@@ -337,10 +337,21 @@ pub fn setup(watchdog: Peri<'static, WATCHDOG>, config: SafetyConfig) -> Safety 
     let last_uptime = watchdog.get_scratch(SCRATCH_UPTIME);
     let panicked = watchdog.get_scratch(SCRATCH_PANIC) == PANIC_MARKER;
 
+    // The panic handler marks scratch3 before anything else, so a watchdog timeout with the marker set is a panic
+    // whose handler never got to its forced reset (it stalled, or faulted while logging)
     match reason {
         Some(ResetReason::Forced) if panicked => {
             counts.panics = counts.panics.wrapping_add(1);
             defmt::error!("Reset by panic after {} ms (faults {=u32:#x})", last_uptime, last_faults);
+            raise_fault(FAULT_WATCHDOG_RESET, last_faults);
+        }
+        Some(ResetReason::TimedOut) if panicked => {
+            counts.panics = counts.panics.wrapping_add(1);
+            defmt::error!(
+                "Reset by panic after {} ms (faults {=u32:#x}); the watchdog expired inside the panic handler",
+                last_uptime,
+                last_faults
+            );
             raise_fault(FAULT_WATCHDOG_RESET, last_faults);
         }
         Some(ResetReason::TimedOut) if valid_record => {
