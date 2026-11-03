@@ -13,8 +13,8 @@
 //! before the C sender ever looks for it.
 //!
 //! So the Rust receiver anchors its schedule to when the detecting capture ended, not to when processing finished.
-//! It samples every symbol in the middle and sends its ACK from [`RX_ACK_START_MS`], just after the packet has
-//! ended as it heard it, until [`RX_ACK_END_MS`], one symbol past the C sender's sample point.
+//! It samples every symbol in the middle and holds the ACK for two symbols centred on 775 ms, from
+//! [`RX_ACK_START_MS`] to [`RX_ACK_END_MS`].
 //!
 //! # Sender, and the propagation delay
 //!
@@ -38,15 +38,16 @@
 //!
 //! | Sender | Receiver | ACK at the sender | ACK heard for |
 //! |---|---|---|---|
-//! | Rust | Rust | `[2d + 705, 2d + 825]`, listened for in `[760, 1096]` | `d` up to [`MAX_PROPAGATION_MS`] (200 m) |
+//! | Rust | Rust | `[2d + 725, 2d + 825]`, listened for in `[760, 1096]` | `d` up to [`MAX_PROPAGATION_MS`] (200 m) |
 //! | Rust | C (latency `t`, about 10 ms) | `[2d + t + 715, 2d + t + 765]` | the same |
-//! | C (samples at 775) | Rust | `[2d + 705, 2d + 825]` | `d < 35`: about 50 m (37 m with the old ACK at 725) |
+//! | C (samples at 775) | Rust | `[2d + 725, 2d + 825]` | `d < 25`: about 37 m |
 //! | C | C | `[2d + t + 715, 2d + t + 765]` | `2d + t < 60`: about 37 m |
 //!
-//! Nothing on the receiving side can make a C sender's single sample reach further than starting the ACK as early
-//! as possible, which is why [`RX_ACK_START_MS`] is now 5 ms after the packet ends rather than 725 ms (centred on
-//! 775 ms). The tests below check each row, for detector speeds from 1.5 ms per capture (the original estimate)
-//! to about 7 ms (what the emulator shows).
+//! A C sender keeps its single sample and so its range. The receiving side could stretch it a little (to about
+//! 50 m) by starting the ACK as soon as the packet ends instead of at 725 ms; that was tried and left out, because
+//! it did slightly worse in the emulator's reverberant pool and reaching a C sender from 37 to 50 m is a niche. The
+//! tests below check each row, for detector speeds from 1.5 ms per capture (the original estimate) to about 7 ms
+//! (what the emulator shows).
 
 use crate::{INTERFRAME_SPACE_MS, PACKET_SYMBOLS, SYMBOL_PERIOD_MS};
 
@@ -78,13 +79,12 @@ pub const fn rx_symbol_sample_ms(i: usize) -> u64 {
     (i as u64 + 1) * SYMBOL_PERIOD_MS + SYMBOL_PERIOD_MS / 2
 }
 
-/// When the receiver starts its ACK/NACK symbol: as soon as the packet is over as it heard it, with a little
-/// margin, so it reaches a C sender's single sample point from as far away as possible.
-pub const RX_ACK_START_MS: u64 = TX_END_MS + 5;
-/// When the receiver ends its ACK/NACK symbol: one symbol past the C sender's sample point, as before.
-pub const RX_ACK_END_MS: u64 = C_ACK_SAMPLE_MS + SYMBOL_PERIOD_MS;
+/// When the receiver starts its ACK/NACK symbol, centring it on the C sender's sample point.
+pub const RX_ACK_START_MS: u64 = C_ACK_SAMPLE_MS - RX_ACK_HOLD_MS / 2;
 /// How long the receiver holds its ACK/NACK symbol.
-pub const RX_ACK_HOLD_MS: u64 = RX_ACK_END_MS - RX_ACK_START_MS;
+pub const RX_ACK_HOLD_MS: u64 = 2 * SYMBOL_PERIOD_MS;
+/// When the receiver ends its ACK/NACK symbol.
+pub const RX_ACK_END_MS: u64 = RX_ACK_START_MS + RX_ACK_HOLD_MS;
 
 /// Duration of one capture (500 samples at 500 kS/s), in microseconds.
 pub const CAPTURE_US: u64 = 1000;
@@ -207,17 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn c_sender_hears_rust_receiver_further_than_c_receiver() {
-        // The C sender samples once at 775 ms. A Rust ACK starting 5 ms after the packet reaches it from 34 ms
-        // (about 50 m) away; a C receiver's (10 ms latency) from 24 ms (about 37 m).
+    fn c_sender_range_is_unchanged() {
+        // The C sender samples once at 775 ms. It hears a Rust receiver's ACK from 24 ms (about 37 m) away, the
+        // same as a C receiver's (10 ms latency)...
         let rust = single_sample_range_ms(C_ACK_SAMPLE_MS, rust_receiver_ack(0));
         let c = single_sample_range_ms(C_ACK_SAMPLE_MS, c_receiver_ack(10));
-        assert_eq!((rust, c), (34, 24));
-        assert!(rust * SOUND_SPEED_M_PER_S / 1000 >= 47);
-        // The old Rust ACK started at 725 ms and reached exactly as far as the C one
-        assert_eq!(single_sample_range_ms(C_ACK_SAMPLE_MS, (725, 825)), 24);
-        // ...and the old single sample at 760 ms reached a Rust receiver from 17 ms (24-26 m)
-        assert_eq!(single_sample_range_ms(760, (725, 825)), 17);
+        assert_eq!((rust, c), (24, 24));
+        // ...while the old Rust sender's single sample at 760 ms only heard it from 17 ms (24-26 m)
+        assert_eq!(single_sample_range_ms(760, rust_receiver_ack(0)), 17);
     }
 
     #[test]
@@ -238,12 +235,12 @@ mod tests {
 
     #[test]
     fn rust_receiver_answers_after_the_packet() {
-        // The ACK starts after the last symbol sample and the end of the packet, so the receiver never transmits
-        // over the sender, and ends after the C sender's sample point
+        // The ACK starts well after the last symbol sample and the end of the packet, so the receiver never
+        // transmits over the sender, and ends well after the C sender's sample point
         const { assert!(RX_ACK_START_MS > TX_END_MS) };
         const { assert!(RX_ACK_START_MS > rx_symbol_sample_ms(PACKET_SYMBOLS - 1) + 20) };
         const { assert!(RX_ACK_END_MS > C_ACK_SAMPLE_MS + 20) };
-        assert_eq!(RX_ACK_HOLD_MS, 120);
+        assert_eq!((RX_ACK_START_MS, RX_ACK_END_MS), (725, 825));
     }
 
     #[test]
