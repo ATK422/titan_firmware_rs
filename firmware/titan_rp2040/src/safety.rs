@@ -406,7 +406,8 @@ pub fn deinit() {
 pub async fn safety_task(mut safety: Safety) -> ! {
     let mut ticker = Ticker::every(TICK);
     let mut last_feed = Instant::now();
-    let mut timeout = WATCHDOG_SETUP_TIMEOUT;
+    // The timeout the watchdog was last fed with, and the warning margin that goes with it
+    let (mut timeout, mut margin) = (WATCHDOG_SETUP_TIMEOUT, WATCHDOG_SETUP_WARN_MARGIN);
     loop {
         ticker.next().await;
         let now = Instant::now();
@@ -418,18 +419,20 @@ pub async fn safety_task(mut safety: Safety) -> ! {
         safety.watchdog.set_scratch(SCRATCH_FAULTS, faults());
         safety.watchdog.set_scratch(SCRATCH_UPTIME, now.as_millis() as u32);
 
-        let (new_timeout, margin) = if is_initialized() {
-            (WATCHDOG_ACTIVE_TIMEOUT, WATCHDOG_ACTIVE_WARN_MARGIN)
-        } else {
-            (WATCHDOG_SETUP_TIMEOUT, WATCHDOG_SETUP_WARN_MARGIN)
-        };
+        // Check how close the countdown that is running now came to the end, against the margin for its own
+        // timeout. Using the margin of the timeout about to be fed raised a warning on every ROS disconnect: the
+        // 500 ms setup margin against the 250 ms active countdown.
         let elapsed = now - last_feed;
         if elapsed + margin > timeout {
             let remaining = timeout.checked_sub(elapsed).unwrap_or(Duration::from_ticks(0));
             raise_fault(FAULT_WATCHDOG_WARNING, remaining.as_micros() as u32);
         }
-        safety.watchdog.feed(new_timeout);
-        timeout = new_timeout;
+        (timeout, margin) = if is_initialized() {
+            (WATCHDOG_ACTIVE_TIMEOUT, WATCHDOG_ACTIVE_WARN_MARGIN)
+        } else {
+            (WATCHDOG_SETUP_TIMEOUT, WATCHDOG_SETUP_WARN_MARGIN)
+        };
+        safety.watchdog.feed(timeout);
         last_feed = now;
     }
 }
