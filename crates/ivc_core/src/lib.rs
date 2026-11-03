@@ -19,10 +19,12 @@
 
 mod ack;
 mod detector;
+pub mod noise;
 pub mod timing;
 
 pub use ack::{ACK_MIN_CAPTURES, ACK_MIN_SPAN_US, AckListener, Response};
 pub use detector::{Band, BandDetector};
+pub use noise::NoiseFloor;
 
 /// Frequency of a `0` symbol.
 pub const FREQ_LOW_HZ: f32 = 17_000.0;

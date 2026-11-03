@@ -131,7 +131,10 @@ pub struct Modem {
     _output_select: Output<'static>,
     captures: watch::Receiver<'static, CriticalSectionRawMutex, Capture, 1>,
     detector: BandDetector<2>,
+    /// The fixed detection thresholds for this vehicle.
     thresholds: Thresholds,
+    /// Noise in the detection bands, measured while idle (only used with the `adaptive-threshold` feature).
+    noise: NoiseFloor,
     is_talos: bool,
     /// Remaining retransmissions before the link counts as broken.
     link_established: u8,
@@ -147,16 +150,22 @@ impl Modem {
             captures: CAPTURES.receiver().expect("only one modem"),
             detector: BandDetector::new(BANDS, SAMPLE_RATE_HZ, NUM_SAMPLES),
             thresholds: if is_talos { TALOS_THRESHOLDS } else { SSFB_THRESHOLDS },
+            noise: NoiseFloor::new(),
             is_talos,
             link_established: 0,
             ssfb_tx_until: Instant::MIN,
         }
     }
 
+    /// The thresholds to classify with: the fixed ones, raised above the noise floor with `adaptive-threshold`.
+    fn thresholds(&self) -> Thresholds {
+        if cfg!(feature = "adaptive-threshold") { self.noise.thresholds(self.thresholds) } else { self.thresholds }
+    }
+
     /// Classifies the most recent capture.
     async fn sample(&mut self) -> Option<bool> {
         let capture = self.captures.get().await;
-        classify(self.detector.process(&capture.samples), self.thresholds)
+        classify(self.detector.process(&capture.samples), self.thresholds())
     }
 
     async fn run(mut self) -> ! {
@@ -195,8 +204,11 @@ impl Modem {
                     let magnitudes = self.detector.process(&capture.samples);
                     if cfg!(feature = "calibration") {
                         link::send(&DeviceToHost::Ivc(ivc::DeviceToHost::RxDebugMagnitude(magnitudes[0])));
-                    } else if classify(magnitudes, self.thresholds) == Some(true) {
+                    } else if classify(magnitudes, self.thresholds()) == Some(true) {
                         self.receive(capture.end).await;
+                    } else if cfg!(feature = "adaptive-threshold") {
+                        // Only idle captures count towards the noise floor: never our own packets or answers
+                        self.noise.update(magnitudes);
                     }
                     // Captures arrive faster than they are processed; let the other tasks run between them
                     yield_now().await;
@@ -261,7 +273,7 @@ impl Modem {
                 // Left over from before the window: skip it rather than spend a detector run on it
                 continue;
             }
-            let symbol = classify(self.detector.process(&capture.samples), self.thresholds);
+            let symbol = classify(self.detector.process(&capture.samples), self.thresholds());
             if let Some(response) = listener.push(since_onset_us, symbol) {
                 let after_packet_ms = since_onset_us / 1000 - timing::TX_END_MS;
                 defmt::debug!("{} heard {} ms after the packet ended", response, after_packet_ms);

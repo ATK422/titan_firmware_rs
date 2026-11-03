@@ -9,6 +9,9 @@ description = "Talos IVC (inter-vehicle communication) acoustic modem firmware"
 [features]
 # Publish the low band magnitude on ivc/debug_rx_mag instead of decoding packets (CALIBRATION_MODE in C)
 calibration = []
+# Raise the detection thresholds above the tracked noise floor in loud water (ivc_core::noise). Off by default: the
+# fixed thresholds are the calibrated C ones, and this has not been tried on hardware.
+adaptive-threshold = []
 
 [build-dependencies]
 titan_build = { path = "../../crates/titan_build" }
