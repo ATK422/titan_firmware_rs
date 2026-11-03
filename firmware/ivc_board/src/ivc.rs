@@ -4,7 +4,8 @@
 //! context. Here [`sampler_task`] keeps capturing 1 ms windows from the ADC, and [`ivc_task`] runs the protocol as
 //! straight-line async code: idle detection, transmit with ACK and retransmission, and receive with ACK/NACK.
 //! Transmit timing is the C schedule; receive and ACK timing follow [`ivc_core::timing`] so Rust and C boards still
-//! line up despite the much faster detector.
+//! line up despite the much faster detector, and the sender listens for the ACK over a window so that it also
+//! arrives from a distant receiver.
 
 use embassy_futures::select::{Either4, select, select4};
 use embassy_futures::yield_now;
@@ -18,7 +19,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{self, Watch};
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer, with_deadline};
 use fixed::FixedU16;
 use fixed::types::extra::U4;
 
@@ -210,6 +211,7 @@ impl Modem {
     async fn transmit(&mut self, request: TxRequest) {
         let word = encode_packet(request.data, request.is_heartbeat);
         loop {
+            let onset = Instant::now();
             let mut symbols = packet_symbols(word);
             self.tx.set_symbol(symbols.next().unwrap());
             self.tx.enable(true);
@@ -221,11 +223,14 @@ impl Modem {
             ticker.next().await;
             self.tx.enable(false);
 
-            Timer::after_millis(timing::ACK_SAMPLE_MS - timing::TX_END_MS).await;
-            let ack = self.sample().await == Some(true);
+            let response = self.listen_for_ack(onset).await;
+            let ack = response.is_ack();
+            if response == Response::Silence {
+                defmt::info!("No response heard from receiver");
+            }
             defmt::info!("Got response of {} from receiver", ack);
 
-            Timer::after_millis(INTERFRAME_SPACE_MS).await;
+            Timer::at(onset + Duration::from_millis(timing::NEXT_TX_MS)).await;
             if ack {
                 self.link_established = MAX_MISSED_PACKETS;
                 return;
@@ -235,6 +240,35 @@ impl Modem {
                 defmt::warn!("IVC link broken!");
                 return;
             }
+        }
+    }
+
+    /// Classifies every capture in the ACK window of the packet whose start symbol began at `onset` until the
+    /// receiver's answer is clear (see [`AckListener`]). Listening over a window instead of sampling once lets the
+    /// answer arrive late, as it does from a distant receiver.
+    async fn listen_for_ack(&mut self, onset: Instant) -> Response {
+        let at = |ms: u64| onset + Duration::from_millis(ms);
+        Timer::at(at(timing::ACK_LISTEN_START_MS)).await;
+        let mut listener = AckListener::new();
+        // Also stop at the end of the window if the captures stop coming
+        let deadline = at(timing::ACK_LISTEN_END_MS + 1);
+        loop {
+            let Ok(capture) = with_deadline(deadline, self.captures.changed()).await else {
+                return Response::Silence;
+            };
+            let since_onset_us = capture.end.saturating_duration_since(onset).as_micros();
+            if since_onset_us < timing::ACK_LISTEN_START_MS * 1000 {
+                // Left over from before the window: skip it rather than spend a detector run on it
+                continue;
+            }
+            let symbol = classify(self.detector.process(&capture.samples), self.thresholds);
+            if let Some(response) = listener.push(since_onset_us, symbol) {
+                let after_packet_ms = since_onset_us / 1000 - timing::TX_END_MS;
+                defmt::debug!("{} heard {} ms after the packet ended", response, after_packet_ms);
+                return response;
+            }
+            // As in `run`: captures come faster than they are processed, so `changed` is always ready at once
+            yield_now().await;
         }
     }
 
@@ -271,7 +305,7 @@ impl Modem {
             }
         }
 
-        Timer::at(at(timing::RX_ACK_START_MS + timing::RX_ACK_HOLD_MS)).await;
+        Timer::at(at(timing::RX_ACK_END_MS)).await;
         self.tx.enable(false);
         self.ssfb_tx_until = Instant::now() + Duration::from_millis(SSFB_TX_WINDOW_MS);
     }

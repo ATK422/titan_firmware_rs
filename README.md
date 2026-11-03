@@ -182,7 +182,8 @@ happen (module docs and comments); the ones you are most likely to notice:
 **Per board**
 * **IVCBoard:** a Goertzel filter replaces the 500-point FFT (same magnitudes, tested against a reference DFT).
   Because it is far faster, receive and ACK timing are anchored to the capture time so Rust and C boards still line
-  up; `crates/ivc_core/src/timing.rs` explains and tests this.
+  up. The sender listens for the ACK over a window that covers the round trip to 200 m instead of sampling it once,
+  which limited ACKs to about 25 m (C: about 37 m); `crates/ivc_core/src/timing.rs` explains and tests this.
 * **IVCBoard2 / IVCDAC:** the same trick for their FIR+Goertzel receiver; the flash recorder erases one sector per
   step so the watchdog survives. `ivc_dac/rx_state` needs `riptide_msgs2/IvcRx`, which the installed
   `riptide_msgs2` lacks; until it is added, the bridge drops that topic.

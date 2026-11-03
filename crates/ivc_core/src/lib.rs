@@ -7,7 +7,8 @@
 //! start (1) | heartbeat flag | data[7:0] | crc4[3:0]       (14 symbols, MSB first after the start symbol)
 //! ```
 //!
-//! After the last symbol the receiver answers with a single ACK (`1`) or NACK (`0`) symbol depending on the CRC.
+//! After the last symbol the receiver answers with a single ACK (`1`) or NACK (`0`) symbol depending on the CRC,
+//! which the sender listens for with an [`AckListener`].
 //! Talos (board ID pin low) sends a heartbeat packet every [`HEARTBEAT_PERIOD_MS`]; the surface vehicle (SSFB) only
 //! transmits within [`SSFB_TX_WINDOW_MS`] of answering a packet from Talos, so the two never talk over each other.
 //!
@@ -16,9 +17,11 @@
 
 #![no_std]
 
+mod ack;
 mod detector;
 pub mod timing;
 
+pub use ack::{ACK_MIN_CAPTURES, ACK_MIN_SPAN_US, AckListener, Response};
 pub use detector::{Band, BandDetector};
 
 /// Frequency of a `0` symbol.
@@ -48,7 +51,8 @@ pub const HEARTBEAT_DATA: u8 = 0x3F;
 /// Depth of the transmit queue. Packets are dropped when it is full.
 pub const TX_QUEUE_DEPTH: usize = 8;
 
-/// Delay after sampling the ACK before the next transmission or retransmission (13 symbols).
+/// Delay after sampling the ACK before the next transmission or retransmission (13 symbols). The Rust sender counts
+/// it from where the single sample used to be; see [`timing::NEXT_TX_MS`].
 pub const INTERFRAME_SPACE_MS: u64 = (PACKET_SIZE as u64 + 1) * SYMBOL_PERIOD_MS;
 /// How long SSFB may transmit after answering a packet from Talos.
 pub const SSFB_TX_WINDOW_MS: u64 = DATA_SIZE as u64 * SYMBOL_PERIOD_MS;
