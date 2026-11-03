@@ -6,6 +6,13 @@
 //! * a transmit queue, a transmit event FIFO (used to confirm heartbeats actually went out) and one receive FIFO fed
 //!   by acceptance filters
 //! * RAM ECC enabled; GPIO0 used as an input sensing the termination resistor jumper
+//!
+//! One deliberate difference: `driver_canbus` restricts every frame to three transmission attempts. When they run
+//! out (no other node acknowledging, after the cable came out, or an error burst), the controller clears TXREQ and
+//! keeps the frame at the head of the queue, and nothing requests it again until a new frame is queued, which can't
+//! happen once the queue is full. The board then stayed silent on a working bus until the 10 s offline reset in
+//! [`crate::canbus`]. Here the transmit queue retries without limit, as CAN controllers normally do, so it starts
+//! sending again as soon as the bus works.
 
 use embassy_rp::gpio::{Input, Output};
 use embassy_rp::peripherals::SPI0;
@@ -81,7 +88,6 @@ const CON_ISOCRCEN: u32 = 1 << 5;
 const CON_PXEDIS: u32 = 1 << 6;
 const CON_WAKFIL: u32 = 1 << 8;
 const CON_WFT_T11: u32 = 0b11 << 9;
-const CON_RTXAT: u32 = 1 << 16;
 const CON_STEF: u32 = 1 << 19;
 const CON_TXQEN: u32 = 1 << 20;
 const CON_REQOP_SHIFT: u32 = 24;
@@ -94,10 +100,9 @@ const MODE_CAN20: u32 = 0b110;
 pub const INT_RXIF: u32 = 1 << 1;
 pub const INT_TEFIF: u32 = 1 << 4;
 pub const INT_ECCIF: u32 = 1 << 8;
-pub const INT_TXATIF: u32 = 1 << 10;
 pub const INT_RXOVIF: u32 = 1 << 11;
 pub const INT_SERRIF: u32 = 1 << 12;
-const INT_ENABLES: u32 = (INT_RXIF | INT_TEFIF | INT_ECCIF | INT_TXATIF | INT_RXOVIF | INT_SERRIF) << 16;
+const INT_ENABLES: u32 = (INT_RXIF | INT_TEFIF | INT_ECCIF | INT_RXOVIF | INT_SERRIF) << 16;
 /// Flags cleared by writing zero to C1INT. The rest mirror FIFO/ECC status and clear at their source.
 const INT_CLEARABLE: u32 = INT_SERRIF;
 
@@ -108,9 +113,9 @@ const FIFO_UINC: u8 = 1 << 0; // bit 8, in byte 1
 const FIFO_TXREQ: u8 = 1 << 1; // bit 9, in byte 1
 const FIFO_FSIZE_SHIFT: u32 = 24;
 const FIFO_PLSIZE_64: u32 = 0b111 << 29;
-const FIFO_TXAT_THREE: u32 = 0b01 << 21;
+/// Unlimited retransmission attempts (also what C1CON.RTXAT = 0 means, which makes the controller ignore TXAT).
+const FIFO_TXAT_UNLIMITED: u32 = 0b11 << 21;
 const STA_NOT_EMPTY_OR_FULL: u8 = 1 << 0;
-const STA_TXATIF: u8 = 1 << 4;
 const TEF_TEFNEIE: u32 = 1 << 0;
 
 // Message object flags word
@@ -191,8 +196,6 @@ const _: () = {
 pub struct Events {
     /// Raw C1INT flags.
     pub flags: u32,
-    /// A queued frame ran out of retransmission attempts and was dropped.
-    pub tx_attempts_exhausted: bool,
     /// The receive FIFO overflowed and frames were lost because they were not read in time.
     pub rx_overflow: bool,
 }
@@ -321,7 +324,6 @@ impl Mcp251xfd {
             | CON_PXEDIS
             | CON_WAKFIL
             | CON_WFT_T11
-            | CON_RTXAT
             | CON_STEF
             | CON_TXQEN
             | MODE_CONFIG << CON_REQOP_SHIFT;
@@ -350,7 +352,7 @@ impl Mcp251xfd {
         }
 
         self.write_u32(reg::C1TEFCON, (TEF_DEPTH - 1) << FIFO_FSIZE_SHIFT | TEF_TEFNEIE).await;
-        self.write_u32(reg::C1TXQCON, FIFO_PLSIZE_64 | (TXQ_DEPTH - 1) << FIFO_FSIZE_SHIFT | FIFO_TXAT_THREE).await;
+        self.write_u32(reg::C1TXQCON, FIFO_PLSIZE_64 | (TXQ_DEPTH - 1) << FIFO_FSIZE_SHIFT | FIFO_TXAT_UNLIMITED).await;
         self.write_u32(
             reg::C1FIFOCON1,
             FIFO_PLSIZE_64 | (RX_DEPTH - 1) << FIFO_FSIZE_SHIFT | FIFO_RXOVIE | FIFO_TFNRFNIE,
@@ -405,11 +407,6 @@ impl Mcp251xfd {
         if flags & INT_CLEARABLE != 0 {
             // Writing 1 leaves a flag alone, writing 0 clears it; the enables in the upper half are preserved
             self.write(reg::C1INT, &(!(flags & INT_CLEARABLE) as u16).to_le_bytes()).await;
-        }
-        if flags & INT_TXATIF != 0 {
-            let sta = self.read_u8(reg::C1TXQSTA).await;
-            self.write_u8(reg::C1TXQSTA, sta & !STA_TXATIF).await;
-            events.tx_attempts_exhausted = true;
         }
         if flags & INT_RXOVIF != 0 {
             self.write_u8(reg::C1FIFOSTA1, 0).await;
