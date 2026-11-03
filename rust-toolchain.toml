@@ -1,0 +1,8 @@
+# Pin the compiler so every machine builds the same firmware images. A different rustc produces slightly
+# different code (and timing), which changes the emulator's bench fingerprints and can move timing-sensitive
+# behaviour such as the IVC detector. Bump this deliberately, and rebuild and re-check the emulator when you do.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+targets = ["thumbv6m-none-eabi"]
+profile = "minimal"

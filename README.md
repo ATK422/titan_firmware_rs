@@ -91,12 +91,18 @@ Portable crates, tools and their tests (any machine; the tools build libusb from
 cargo test
 ```
 
-Firmware (needs `rustup target add thumbv6m-none-eabi`):
+Firmware:
 
 ```bash
 cd firmware
 cargo build --workspace --release
 ```
+
+The compiler is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust 1.99.0, with the
+`thumbv6m-none-eabi` target, rustfmt and clippy), so every machine builds the same images. rustup picks it up in
+this repository; if your rustup doesn't install it on first use, run `rustup toolchain install` in the repository
+root. A different compiler produces slightly different code and timing, which changes the firmware simulator's
+bench fingerprints and can move timing-sensitive behaviour such as the IVC detector, so bump the pin deliberately.
 
 Bridge, plus its ROS round-trip tests (inside the riptide ROS 2 Humble environment):
 
