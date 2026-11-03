@@ -43,7 +43,7 @@ work in two:
 | `talos/Actuator` | `actuator_board` (`--features v1` for the V1 hardware) | `actuator` | `/talos/actuator_mk2` | 5 | internal FD |
 | `talos/CameraCageBB` | `camera_cage_bb` | `camera_cage` | `/talos/camera_cage_bb` | 4 | internal FD |
 | `talos/ESCBoard` | `esc_board` (ID from GPIO 29) | `esc0`, `esc1` | `/talos/esc_board_0`, `_1` | 2, 3 | internal FD |
-| `talos/IVCBoard` | `ivc_board` (`--features calibration`) | `ivc` | `/talos/ivc_board` | 8 | internal FD |
+| `talos/IVCBoard` | `ivc_board` (`--features calibration`, `adaptive-threshold`) | `ivc` | `/talos/ivc_board` | 8 | internal FD |
 | `talos/IVCBoard2` | `ivc_board2` | `ivc2` | `/talos/IVCBoard2` | 8 | internal FD |
 | `talos/IVCDAC` | `ivc_dac` (`--features rx-side`) | `ivc_dac` | `/talos/ivc_dac` | 8 | internal FD |
 | `talos/LEDBoard` | `led_board` | `led` | `/talos/led_board` | 6 | internal FD |
@@ -182,7 +182,10 @@ happen (module docs and comments); the ones you are most likely to notice:
 **Per board**
 * **IVCBoard:** a Goertzel filter replaces the 500-point FFT (same magnitudes, tested against a reference DFT).
   Because it is far faster, receive and ACK timing are anchored to the capture time so Rust and C boards still line
-  up; `crates/ivc_core/src/timing.rs` explains and tests this.
+  up. The sender listens for the ACK over a window that covers the round trip to 200 m instead of sampling it once,
+  which limited ACKs to about 25 m (C: about 37 m); `crates/ivc_core/src/timing.rs` explains and tests this.
+  `--features adaptive-threshold` raises the fixed detection thresholds above a tracked noise floor in loud water
+  (`crates/ivc_core/src/noise.rs`); off by default until it has been tried against the real hydrophone's noise.
 * **IVCBoard2 / IVCDAC:** the same trick for their FIR+Goertzel receiver; the flash recorder erases one sector per
   step so the watchdog survives. `ivc_dac/rx_state` needs `riptide_msgs2/IvcRx`, which the installed
   `riptide_msgs2` lacks; until it is added, the bridge drops that topic.

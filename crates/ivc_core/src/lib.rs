@@ -7,7 +7,8 @@
 //! start (1) | heartbeat flag | data[7:0] | crc4[3:0]       (14 symbols, MSB first after the start symbol)
 //! ```
 //!
-//! After the last symbol the receiver answers with a single ACK (`1`) or NACK (`0`) symbol depending on the CRC.
+//! After the last symbol the receiver answers with a single ACK (`1`) or NACK (`0`) symbol depending on the CRC,
+//! which the sender listens for with an [`AckListener`].
 //! Talos (board ID pin low) sends a heartbeat packet every [`HEARTBEAT_PERIOD_MS`]; the surface vehicle (SSFB) only
 //! transmits within [`SSFB_TX_WINDOW_MS`] of answering a packet from Talos, so the two never talk over each other.
 //!
@@ -16,10 +17,14 @@
 
 #![no_std]
 
+mod ack;
 mod detector;
+pub mod noise;
 pub mod timing;
 
+pub use ack::{ACK_MIN_CAPTURES, ACK_MIN_SPAN_US, AckListener, Response};
 pub use detector::{Band, BandDetector};
+pub use noise::NoiseFloor;
 
 /// Frequency of a `0` symbol.
 pub const FREQ_LOW_HZ: f32 = 17_000.0;
@@ -48,7 +53,8 @@ pub const HEARTBEAT_DATA: u8 = 0x3F;
 /// Depth of the transmit queue. Packets are dropped when it is full.
 pub const TX_QUEUE_DEPTH: usize = 8;
 
-/// Delay after sampling the ACK before the next transmission or retransmission (13 symbols).
+/// Delay after sampling the ACK before the next transmission or retransmission (13 symbols). The Rust sender counts
+/// it from where the single sample used to be; see [`timing::NEXT_TX_MS`].
 pub const INTERFRAME_SPACE_MS: u64 = (PACKET_SIZE as u64 + 1) * SYMBOL_PERIOD_MS;
 /// How long SSFB may transmit after answering a packet from Talos.
 pub const SSFB_TX_WINDOW_MS: u64 = DATA_SIZE as u64 * SYMBOL_PERIOD_MS;
@@ -121,6 +127,8 @@ pub struct ReceivedPacket {
     pub data: u8,
     pub crc: u8,
     pub is_heartbeat: bool,
+    /// Symbols that weren't detected (counted as `0` in `data` and `crc`).
+    pub missed_symbols: u8,
     /// True if every symbol was detected and the CRC matched. The receiver ACKs exactly when this is set.
     pub valid: bool,
 }
@@ -134,7 +142,7 @@ pub struct ReceivedPacket {
 pub struct PacketAssembler {
     word: u16,
     count: usize,
-    missed_symbol: bool,
+    missed_symbols: u8,
 }
 
 impl PacketAssembler {
@@ -149,7 +157,7 @@ impl PacketAssembler {
         }
         match symbol {
             Some(bit) => self.word |= (bit as u16) << (PACKET_SIZE as usize - self.count),
-            None => self.missed_symbol = true,
+            None => self.missed_symbols += 1,
         }
         self.count += 1;
         (self.count == PACKET_SYMBOLS).then(|| self.packet())
@@ -162,7 +170,8 @@ impl PacketAssembler {
             data,
             crc,
             is_heartbeat: self.word & (1 << PACKET_SIZE) != 0,
-            valid: !self.missed_symbol && crc == crc4(data),
+            missed_symbols: self.missed_symbols,
+            valid: self.missed_symbols == 0 && crc == crc4(data),
         }
     }
 }
@@ -215,7 +224,9 @@ mod tests {
                 for &s in &symbols[1..] {
                     out = asm.push(Some(s));
                 }
-                assert_eq!(out, Some(ReceivedPacket { data, crc: crc4(data), is_heartbeat: hb, valid: true }));
+                let expected =
+                    ReceivedPacket { data, crc: crc4(data), is_heartbeat: hb, missed_symbols: 0, valid: true };
+                assert_eq!(out, Some(expected));
             }
         }
     }
@@ -237,7 +248,8 @@ mod tests {
 
             let mut asm = PacketAssembler::new();
             let missing = asm_out(&mut asm, symbols.iter().enumerate().map(|(i, &s)| (i != idx).then_some(s)));
-            assert!(!missing.unwrap().valid, "missing at {idx}");
+            let missing = missing.unwrap();
+            assert!(!missing.valid && missing.missed_symbols == 1, "missing at {idx}");
         }
     }
 

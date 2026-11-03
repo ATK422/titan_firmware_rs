@@ -16,7 +16,7 @@ defmt = "1.2.0"
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-futures = "0.1.2"
 # `intrinsics` routes soft float through the RP2040 ROM routines, which the IVC detector leans on heavily
-embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "time-driver", "critical-section-impl", "unstable-pac", "intrinsics"] }
+embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "time-driver", "critical-section-impl", "unstable-pac", "intrinsics", "rom-func-cache"] }
 embassy-sync = "0.8.0"
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
 # Drivers talk to I2C devices through the trait so boards can share a bus (embassy-embedded-hal shared bus types)

@@ -157,9 +157,6 @@ async fn serve(
         if events.rx_overflow {
             safety::raise_fault(safety::FAULT_CAN_INTERNAL_ERROR, events.flags);
         }
-        if events.tx_attempts_exhausted {
-            defmt::warn!("CAN frame dropped after retransmission attempts ({})", dev.error_state().await);
-        }
 
         while let Some(frame) = dev.receive().await? {
             let fields = id::Fields::decode(frame.id, frame.extended);
