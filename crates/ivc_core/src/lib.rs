@@ -127,6 +127,8 @@ pub struct ReceivedPacket {
     pub data: u8,
     pub crc: u8,
     pub is_heartbeat: bool,
+    /// Symbols that weren't detected (counted as `0` in `data` and `crc`).
+    pub missed_symbols: u8,
     /// True if every symbol was detected and the CRC matched. The receiver ACKs exactly when this is set.
     pub valid: bool,
 }
@@ -140,7 +142,7 @@ pub struct ReceivedPacket {
 pub struct PacketAssembler {
     word: u16,
     count: usize,
-    missed_symbol: bool,
+    missed_symbols: u8,
 }
 
 impl PacketAssembler {
@@ -155,7 +157,7 @@ impl PacketAssembler {
         }
         match symbol {
             Some(bit) => self.word |= (bit as u16) << (PACKET_SIZE as usize - self.count),
-            None => self.missed_symbol = true,
+            None => self.missed_symbols += 1,
         }
         self.count += 1;
         (self.count == PACKET_SYMBOLS).then(|| self.packet())
@@ -168,7 +170,8 @@ impl PacketAssembler {
             data,
             crc,
             is_heartbeat: self.word & (1 << PACKET_SIZE) != 0,
-            valid: !self.missed_symbol && crc == crc4(data),
+            missed_symbols: self.missed_symbols,
+            valid: self.missed_symbols == 0 && crc == crc4(data),
         }
     }
 }
@@ -221,7 +224,9 @@ mod tests {
                 for &s in &symbols[1..] {
                     out = asm.push(Some(s));
                 }
-                assert_eq!(out, Some(ReceivedPacket { data, crc: crc4(data), is_heartbeat: hb, valid: true }));
+                let expected =
+                    ReceivedPacket { data, crc: crc4(data), is_heartbeat: hb, missed_symbols: 0, valid: true };
+                assert_eq!(out, Some(expected));
             }
         }
     }
@@ -243,7 +248,8 @@ mod tests {
 
             let mut asm = PacketAssembler::new();
             let missing = asm_out(&mut asm, symbols.iter().enumerate().map(|(i, &s)| (i != idx).then_some(s)));
-            assert!(!missing.unwrap().valid, "missing at {idx}");
+            let missing = missing.unwrap();
+            assert!(!missing.valid && missing.missed_symbols == 1, "missing at {idx}");
         }
     }
 

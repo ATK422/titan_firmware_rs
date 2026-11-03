@@ -305,7 +305,10 @@ impl Modem {
         self.tx.set_symbol(packet.valid);
         self.tx.enable(true);
 
-        if !packet.valid {
+        if packet.missed_symbols > 0 {
+            // The CRC may even match then; the C firmware's message only ever showed the two CRCs
+            defmt::info!("Got CRC_BAD: {} of {} symbols not detected", packet.missed_symbols, PACKET_SYMBOLS);
+        } else if !packet.valid {
             defmt::info!("Got CRC_BAD: got {} and expected {}", packet.crc, crc4(packet.data));
         } else {
             self.link_established = MAX_MISSED_PACKETS;
