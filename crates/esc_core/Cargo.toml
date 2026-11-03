@@ -1,0 +1,12 @@
+[package]
+name = "esc_core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Hardware independent core of the Talos ESC board: DShot framing, telemetry decoding and the thruster RPM controller"
+
+[dependencies]
+defmt = { version = "1", optional = true }
+
+[features]
+defmt = ["dep:defmt"]

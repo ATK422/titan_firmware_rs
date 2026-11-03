@@ -1,0 +1,14 @@
+[package]
+name = "titan_bridge"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "ROS 2 node that serves Rust titan firmware boards over CANmore"
+
+[dependencies]
+anyhow = "1.0.104"
+canmore = { path = "../../crates/canmore" }
+puddles_core = { path = "../../crates/puddles_core" }
+rclrs = "0.8"
+socketcan = "4.0.0"
+titan_link = { path = "../../crates/titan_link" }

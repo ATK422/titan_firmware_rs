@@ -1,0 +1,12 @@
+[package]
+name = "ivc_core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+defmt = { version = "1", optional = true }
+libm = "0.2.16"
+
+[features]
+defmt = ["dep:defmt"]

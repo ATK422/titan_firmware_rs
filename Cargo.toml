@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "host/titan_bridge", "tools/*"]
+# The bridge links against ROS 2 and only builds inside `riptide-shell`, so a
+# plain `cargo test` covers just the portable protocol crates.
+default-members = ["crates/*", "tools/*"]
+exclude = ["firmware"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"

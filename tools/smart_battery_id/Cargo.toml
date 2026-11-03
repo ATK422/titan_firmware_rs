@@ -1,0 +1,9 @@
+[package]
+name = "smart_battery_id"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Writes the UF2 image that programs a smart battery board's serial number (replaces id_gen/id.uf2)"
+
+[dependencies]
+smart_battery_core = { path = "../../crates/smart_battery_core" }

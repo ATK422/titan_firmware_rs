@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "titan_rp2040",
+    "template",
+    "dynamixel",
+    "dynamixel_test",
+    # Talos
+    "actuator_board",
+    "camera_cage_bb",
+    "esc_board",
+    "ivc_board",
+    "ivc_board2",
+    "ivc_dac",
+    "led_board",
+    "led_board2",
+    "poac_board",
+    "power_board",
+    "sbc_board",
+    "smart_battery",
+    # Puddles
+    "puddles_backplane",
+    # Lilboat
+    "hbridge_board",
+    "po_half_board",
+]
+
+[profile.dev]
+# The IVC detector does ~1000 float operations per symbol decision; unoptimized code is too slow to keep up
+opt-level = "s"
+debug = 2
+
+[profile.release]
+debug = 2
+lto = "fat"
+opt-level = "s"
+codegen-units = 1

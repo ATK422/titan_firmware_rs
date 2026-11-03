@@ -1,0 +1,18 @@
+[package]
+name = "dynamixel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Dynamixel servo driver (protocol 2.0 over a half duplex UART), ported from driver_dynamixel"
+
+[dependencies]
+dynamixel_protocol = { path = "../../crates/dynamixel_protocol", features = ["defmt"] }
+
+defmt = "1.2.0"
+embassy-futures = "0.1.2"
+embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "time-driver", "critical-section-impl", "unstable-pac", "intrinsics"] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["defmt"] }
+fixed = "1.31.0"
+heapless = "0.9.3"
+pio = "0.3.0"

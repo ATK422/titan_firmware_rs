@@ -1,0 +1,10 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# Flash over SWD and stream defmt logs. To flash over USB in BOOTSEL mode instead (no logs), use
+# `picotool load -u -v -x -t elf <elf>` from riptide-shell.
+runner = "probe-rs run --chip RP2040"
+
+[env]
+DEFMT_LOG = "info"

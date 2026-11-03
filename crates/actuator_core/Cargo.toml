@@ -1,0 +1,13 @@
+[package]
+name = "actuator_core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Hardware independent actuator logic of the Talos actuator board (state machines, checks, timings)"
+
+[dependencies]
+titan_link = { path = "../titan_link" }
+defmt = { version = "1", optional = true }
+
+[features]
+defmt = ["dep:defmt", "titan_link/defmt"]

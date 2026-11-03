@@ -1,0 +1,12 @@
+[package]
+name = "titan_sensors"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Hardware independent sensor math (CRCs, conversions, compensation) shared by the RP2040 drivers"
+
+[dependencies]
+defmt = { version = "1", optional = true }
+
+[features]
+defmt = ["dep:defmt"]

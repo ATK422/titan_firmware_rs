@@ -1,0 +1,8 @@
+[package]
+name = "titan_build"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Build script helper for titan firmware boards: RP2040 memory map, linker scripts and version info"
+
+[dependencies]

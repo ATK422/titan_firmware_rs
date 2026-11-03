@@ -1,0 +1,15 @@
+[package]
+name = "puddles_core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Hardware independent core of the Puddles backplane: UDP datagram framing, DShot thruster logic, rail voltages and software kill locks"
+
+[dependencies]
+defmt = { version = "1", optional = true }
+heapless = "0.9"
+serde = { version = "1.0.229", default-features = false }
+titan_link = { path = "../titan_link" }
+
+[features]
+defmt = ["dep:defmt", "titan_link/defmt"]

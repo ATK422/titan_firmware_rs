@@ -1,0 +1,13 @@
+[package]
+name = "canmore_cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Interactive debug CLI for CANmore devices (applications, bootloaders, Linux machines)"
+
+[dependencies]
+anyhow = "1.0.104"
+canmore = { path = "../../crates/canmore" }
+libc = "0.2.191"
+rustyline = "19.0.0"
+titan_tools = { path = "../titan_tools" }

@@ -1,0 +1,11 @@
+[package]
+name = "canmore"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+defmt = { version = "1.0", optional = true }
+
+[features]
+defmt = ["dep:defmt"]

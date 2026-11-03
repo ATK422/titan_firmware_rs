@@ -1,0 +1,25 @@
+[package]
+name = "ivc_board2"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "Talos IVC board, second revision firmware (acoustic modem, pinger listener and flash recorder)"
+
+[build-dependencies]
+titan_build = { path = "../../crates/titan_build" }
+
+[dependencies]
+titan_rp2040 = { path = "../titan_rp2040" }
+canmore = { path = "../../crates/canmore", features = ["defmt"] }
+titan_link = { path = "../../crates/titan_link", features = ["defmt"] }
+ivc2_core = { path = "../../crates/ivc2_core", features = ["defmt"] }
+
+cortex-m-rt = "0.7.7"
+defmt = "1.2.0"
+defmt-rtt = "1.3.1"
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-futures = "0.1.2"
+embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "time-driver", "critical-section-impl", "unstable-pac", "intrinsics"] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
+fixed = "1.31.0"

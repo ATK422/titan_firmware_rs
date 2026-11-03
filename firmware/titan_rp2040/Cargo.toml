@@ -1,0 +1,28 @@
+[package]
+name = "titan_rp2040"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Shared embassy support for UWRT RP2040 boards: safety, status LED, CAN (MCP251xFD + CANmore) and the titan_link device side"
+
+[dependencies]
+canmore = { path = "../../crates/canmore", features = ["defmt"] }
+titan_link = { path = "../../crates/titan_link", features = ["defmt"] }
+titan_sensors = { path = "../../crates/titan_sensors", features = ["defmt"] }
+
+cortex-m = "0.7.10"
+cortex-m-rt = "0.7.7"
+defmt = "1.2.0"
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-futures = "0.1.2"
+# `intrinsics` routes soft float through the RP2040 ROM routines, which the IVC detector leans on heavily
+embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "time-driver", "critical-section-impl", "unstable-pac", "intrinsics"] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
+# Drivers talk to I2C devices through the trait so boards can share a bus (embassy-embedded-hal shared bus types)
+embedded-hal-async = "1.0.0"
+fixed = "1.31.0"
+heapless = "0.9.3"
+portable-atomic = { version = "1.15.0", features = ["critical-section"] }
+# Colour type taken by embassy-rp's WS2812 PIO driver (status strip)
+smart-leds = "0.4.0"

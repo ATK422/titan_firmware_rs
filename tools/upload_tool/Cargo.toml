@@ -1,0 +1,11 @@
+[package]
+name = "upload_tool"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Flashes RP2040 boards over USB (BOOTSEL), CAN and Ethernet (CANmore bootloader)"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4", features = ["derive"] }
+titan_tools = { path = "../titan_tools" }

@@ -1,0 +1,14 @@
+[package]
+name = "ledc_core"
+description = "Talos LED board logic: L99LD20 LED controller frames and registers, colour patterns, thermal derating (no_std, host-tested)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+defmt = { version = "1", optional = true }
+embedded-hal = "1.0.0"
+libm = "0.2.16"
+
+[features]
+defmt = ["dep:defmt"]

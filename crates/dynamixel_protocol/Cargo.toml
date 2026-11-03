@@ -1,0 +1,12 @@
+[package]
+name = "dynamixel_protocol"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Dynamixel protocol 2.0 packets (CRC-16, byte stuffing, building and parsing) and the XL430 control table"
+
+[dependencies]
+defmt = { version = "1", optional = true }
+
+[features]
+defmt = ["dep:defmt"]

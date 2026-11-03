@@ -1,0 +1,16 @@
+[package]
+name = "titan_tools"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Shared host-side library for the titan firmware tools (canmore_cli, upload_tool)"
+
+[dependencies]
+anyhow = "1.0.104"
+canmore = { version = "0.1.0", path = "../../crates/canmore" }
+libc = "0.2.191"
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+rusb = { version = "0.9.4", features = ["vendored"] }
+serde_json = "1.0.154"
+socket2 = "0.6.5"
+socketcan = "4"
