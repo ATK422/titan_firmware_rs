@@ -1,0 +1,13 @@
+[package]
+name = "titan_control"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Portable logic of the CANmore control interfaces served by the RP2040 firmware: the debug register map with remote commands (titan_debug) and the bootloader register map (titan_bootloader)"
+
+[dependencies]
+canmore = { path = "../canmore" }
+defmt = { version = "1.0", optional = true }
+
+[features]
+defmt = ["dep:defmt", "canmore/defmt"]

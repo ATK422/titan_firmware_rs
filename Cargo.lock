@@ -1463,6 +1463,14 @@ name = "titan_build"
 version = "0.1.0"
 
 [[package]]
+name = "titan_control"
+version = "0.1.0"
+dependencies = [
+ "canmore",
+ "defmt",
+]
+
+[[package]]
 name = "titan_link"
 version = "0.1.0"
 dependencies = [

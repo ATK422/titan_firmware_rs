@@ -69,6 +69,7 @@ unless a board's `main.rs` says otherwise (IDs 0-4 are fixed by the Rust safety 
 | `firmware/titan_rp2040` | Safety, status LED, MCP2517FD driver, CANmore client, link task, one-call board bring-up, shared drivers (SHT41, MCP3426, MS5837 depth, CD74HC4051, WS2812 status strip) | `titan_safety`, `driver_led`, `driver_canbus`, `micro_ros_pico`, the `driver_*` sensors, template `main.c`/`ros.c` |
 | `firmware/<board>` | One crate per board (table above) | `talos/*`, `puddles/*`, `lilboat/*`, `SBCBoard` |
 | `firmware/dynamixel` | Async Dynamixel servo driver | `driver_dynamixel` |
+| `crates/titan_control` | Control interface register maps (debug, remote commands, bootloader), not yet wired into firmware | `titan_debug`, `titan_bootloader` |
 | `crates/canmore` | CANmore IDs, CRC-18, message fragmentation, heartbeat, register-mapped protocol client and server (`no_std`) | `titan_canmore` |
 | `crates/titan_link` | Firmware ⇄ bridge protocol, one module per board (`no_std`, serde + postcard) | the micro-ROS message set in each `ros.c` |
 | `crates/titan_sensors` | Sensor math: CRCs, MS5837 compensation, conversions | inside the `driver_*` sensors |
@@ -152,7 +153,10 @@ UDP port 2203 at both ends: one datagram is the bytes `TL` followed by one postc
 
 ## Control interface and bootloader
 
-Being ported. Until then Rust boards report control interface mode `None` in their CANmore heartbeat, so
+Not finished. `crates/titan_control` has the portable, host-tested half: the debug register map served in Normal
+mode (version, uptime, reboot, enter bootloader, faults, crash log, memory access, remote commands) and the
+bootloader register map with its flash layout and image check. It isn't wired into `titan_rp2040` or a bootloader
+firmware yet, so Rust boards still report control interface mode `None` in their CANmore heartbeat, and
 `canmore_cli` and CAN/Ethernet uploads only work with C firmware and the C bootloader.
 
 ## Differences from the C firmware
