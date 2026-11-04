@@ -1,0 +1,199 @@
+# Emulator checks: boots this commit's firmware images in the RP2040 emulator (ATK422/firmware_simulator) and runs
+# the emulator's firmware tests against them:
+#   * smoke     every board image boots on its board, connects to a mock titan_bridge and reports its status
+#   * faults    fault injection (CAN errors, bus off, sensor failures, watchdog, panics, brownouts, Puddles' cable)
+#   * robot     Talos's boards together on their internal CAN FD and external classic buses
+#   * ivc_link  IVC boards exchanging bytes acoustically across the pool
+# (about 1.5 minutes of tests on a 4-core runner once everything is built). Tests that need the C titan_firmware
+# images skip: those are not built here.
+#
+# The emulator's tests encode the firmware's expected behaviour: timings, fault bits, log lines, and the
+# `firmware_finding_*` tests, which pin down known firmware bugs as they are today. So an intentional change of
+# firmware behaviour (fixing one of those findings included) fails here until the emulator's tests are changed to
+# match. Make the matching change in firmware_simulator (its tests take the images from TITAN_RS_RELEASE_DIR, so
+# they can be run against this branch's images locally), and run this workflow by hand with `emulator_ref` set to
+# that branch to see both together. Merge the emulator change when the firmware change lands.
+#
+# Layout: the emulator is checked out at master (or `emulator_ref`), and this checkout of titan_firmware_rs takes
+# the place of its `external/titan_firmware_rs` submodule. The emulator's workspace builds against this commit's
+# host crates (`crates/canmore`, `crates/titan_link`) and its tests boot this commit's images
+# (TITAN_RS_RELEASE_DIR); no second token or submodule fetch is needed.
+#
+# Secret: FIRMWARE_SIMULATOR_TOKEN, a token that can read ATK422/firmware_simulator (a fine-grained personal access
+# token with "Contents: read" on that repository; Settings > Secrets and variables > Actions). Without it the job
+# fails at its first step. Pull requests from forks get no secrets, so they fail there too.
+name: Emulator
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      emulator_ref:
+        description: firmware_simulator branch, tag or commit to test against
+        required: false
+        default: master
+
+concurrency:
+  group: emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  EMULATOR_REF: ${{ inputs.emulator_ref || 'master' }}
+  # A missing image fails a test instead of skipping it (for emulators that know SIM_REQUIRE_TITAN_RS; the "No
+  # skipped firmware tests" step catches skips from older ones)
+  SIM_REQUIRE_TITAN_RS: "1"
+  TITAN_RS_RELEASE_DIR: ${{ github.workspace }}/firmware_simulator/external/titan_firmware_rs/firmware/target/thumbv6m-none-eabi/release
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check for the emulator token
+        env:
+          TOKEN: ${{ secrets.FIRMWARE_SIMULATOR_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error title=FIRMWARE_SIMULATOR_TOKEN is not set::The emulator (ATK422/firmware_simulator) may be private: add a repository secret FIRMWARE_SIMULATOR_TOKEN holding a token that can read it (a fine-grained personal access token with Contents: read). Pull requests from forks get no secrets."
+            exit 1
+          fi
+
+      - name: Check out the emulator
+        uses: actions/checkout@v4
+        with:
+          repository: ATK422/firmware_simulator
+          ref: ${{ env.EMULATOR_REF }}
+          token: ${{ secrets.FIRMWARE_SIMULATOR_TOKEN }}
+          path: firmware_simulator
+          submodules: false
+          persist-credentials: false
+
+      - name: Check out titan_firmware_rs as the emulator's external/titan_firmware_rs
+        uses: actions/checkout@v4
+        with:
+          path: firmware_simulator/external/titan_firmware_rs
+          persist-credentials: false
+
+      - name: Rust toolchains
+        working-directory: firmware_simulator/external/titan_firmware_rs
+        run: |
+          # The firmware's pinned compiler (rust-toolchain.toml), installed explicitly: newer rustup no longer
+          # installs a toolchain file's toolchain on first use
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml 2>/dev/null || true)
+          channel=${channel:-stable}
+          rustup toolchain install "$channel" --profile minimal --target thumbv6m-none-eabi
+          # The emulator builds with stable, as in its own CI
+          rustup toolchain install stable --profile minimal
+          echo "FIRMWARE_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+          rustc +"$channel" --version
+          rustc +stable --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            firmware_simulator/external/titan_firmware_rs/firmware -> target
+            firmware_simulator -> target
+          cache-on-failure: true
+
+      - name: Firmware images
+        working-directory: firmware_simulator/external/titan_firmware_rs/firmware
+        run: |
+          cargo +"$FIRMWARE_TOOLCHAIN" build --workspace --release
+          ls -l "$TITAN_RS_RELEASE_DIR"
+
+      - name: Build the emulator and its firmware tests
+        working-directory: firmware_simulator
+        env:
+          # Smaller and faster to build and cache; the tests need no debug info for the emulator itself
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
+        run: |
+          echo "firmware_simulator $(git rev-parse --short HEAD) ($EMULATOR_REF)"
+          cargo +stable build --release
+          cargo +stable test --release -p sim_test --test smoke --test faults --test robot --no-run
+          cargo +stable test --release -p sim_host --test ivc_link --no-run
+
+      - name: Firmware tests
+        working-directory: firmware_simulator
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
+        run: |
+          logs=$RUNNER_TEMP/emulator-logs
+          mkdir -p "$logs"
+          status=0
+          suite() {
+            name=$1
+            shift
+            echo "::group::$name"
+            # --nocapture: the smoke table, and the "skipping:" lines the next step looks for
+            if ! cargo +stable test --release "$@" -- --nocapture 2>&1 | tee "$logs/$name.log"; then
+              echo "::error title=Emulator tests: $name::the $name suite failed; see its log above and the job summary"
+              status=1
+            fi
+            echo "::endgroup::"
+          }
+          suite smoke -p sim_test --test smoke
+          suite faults -p sim_test --test faults
+          suite robot -p sim_test --test robot
+          suite ivc_link -p sim_host --test ivc_link
+          exit $status
+
+      - name: No skipped firmware tests
+        if: always()
+        run: |
+          # The emulator's tests pass, skipping, when a titan_firmware_rs image is missing; here that is a failure
+          shopt -s nullglob
+          logs=("$RUNNER_TEMP"/emulator-logs/*.log)
+          [ ${#logs[@]} -gt 0 ] || exit 0
+          skipped=$(grep -h 'skipping: .*thumbv6m-none-eabi/release' "${logs[@]}" || true)
+          if [ -n "$skipped" ]; then
+            echo "$skipped"
+            echo "::error title=Firmware tests skipped::$(echo "$skipped" | wc -l) emulator test(s) skipped for want of an image in $TITAN_RS_RELEASE_DIR"
+            exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=$RUNNER_TEMP/emulator-logs
+          fw=firmware_simulator/external/titan_firmware_rs
+          {
+            echo "## Emulator checks"
+            echo
+            echo "titan_firmware_rs \`$(git -C "$fw" rev-parse --short HEAD 2>/dev/null)\` built with" \
+              "\`$(rustc +"${FIRMWARE_TOOLCHAIN:-stable}" --version 2>/dev/null)\`, tested on firmware_simulator" \
+              "\`$(git -C firmware_simulator rev-parse --short HEAD 2>/dev/null)\` ($EMULATOR_REF)."
+            echo
+            echo "### Smoke test: every board boots and connects"
+            echo
+            if [ -f "$logs/smoke.log" ]; then
+              echo '```'
+              awk '/^board +connected/ { p = 1; print; next } p && !/^[a-z0-9_]+ +(never|[0-9])/ { exit } p' "$logs/smoke.log"
+              echo '```'
+            else
+              echo "Not run."
+            fi
+            echo
+            echo "### Suites"
+            echo
+            echo "| Suite | Result |"
+            echo "|---|---|"
+            for f in "$logs"/*.log; do
+              result=$(grep -E '^test result:' "$f" | tail -n 1)
+              echo "| $(basename "$f" .log) | ${result:-did not finish (build error?)} |"
+            done
+            failed=$(cat "$logs"/*.log 2>/dev/null | grep -E '^test .* \.\.\. FAILED$' || true)
+            if [ -n "$failed" ]; then
+              echo
+              echo "### Failed tests"
+              echo
+              echo "The emulator's tests encode expected firmware behaviour: if the firmware changed on purpose, the"
+              echo "emulator's tests need the matching change (see the comment at the top of emulator.yml)."
+              echo
+              echo '```'
+              echo "$failed"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

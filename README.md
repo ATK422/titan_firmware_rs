@@ -112,6 +112,41 @@ cargo build -p titan_bridge --release
 cargo test -p titan_bridge
 ```
 
+## Emulator CI
+
+[`.github/workflows/emulator.yml`](.github/workflows/emulator.yml) runs on every push and pull request. It builds
+the firmware images with the pinned compiler and boots them in the RP2040 emulator
+([`ATK422/firmware_simulator`](https://github.com/ATK422/firmware_simulator), at `master`), and then runs the
+emulator's firmware tests against them:
+
+* `smoke`: every board boots on its board, connects to a mock `titan_bridge` and reports its status. The job
+  summary shows the table.
+* `faults`: CAN errors, bus off, sensor failures, watchdog, panics, brownouts, and Puddles' cable.
+* `robot`: Talos's boards share their buses.
+* `ivc_link`: IVC boards exchange bytes across the pool.
+
+This checkout takes the place of the emulator's `external/titan_firmware_rs` submodule. The emulator therefore
+builds against this commit's `canmore` and `titan_link` crates and tests this commit's images. A test that skips
+for want of an image counts as a failure here. The tests take about 1.5 minutes once everything is built.
+
+* **Secret:** `FIRMWARE_SIMULATOR_TOKEN`, a token that can read `ATK422/firmware_simulator`. A fine-grained
+  personal access token with "Contents: read" on that repository works. Without it the job fails at its first
+  step, and pull requests from forks get no secrets, so they fail there too.
+* **Firmware behaviour changes:** the emulator's tests encode what the firmware is expected to do. This covers
+  timings, fault bits and log lines. It also covers the `firmware_finding_*` tests, which pin down known firmware
+  bugs as they are today. An intentional behaviour change, including a fix for one of those findings, therefore
+  fails here until the emulator's tests change to match. Make that change in firmware_simulator, then run the
+  workflow by hand (*Run workflow*) with `emulator_ref` set to that branch. Merge the two together.
+
+To run the same tests locally, point a firmware_simulator checkout at your images:
+
+```bash
+cd firmware && cargo build --workspace --release && cd ..
+cd ../firmware_simulator
+TITAN_RS_RELEASE_DIR=$OLDPWD/firmware/target/thumbv6m-none-eabi/release \
+  cargo test --release -p sim_test --test smoke -- --nocapture
+```
+
 ## Flashing
 
 With an SWD probe (logs stream over defmt/RTT):
