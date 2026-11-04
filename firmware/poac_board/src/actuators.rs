@@ -5,19 +5,19 @@
 //!   answer (`uart_scheduler`), pings the servo every second, and runs the end-of-move alarms.
 //! * [`handle_command`] runs ROS commands straight away, like the C subscription callbacks, and stores the outcome
 //!   for `state/actuator/cmd_feedback` and `cmd_status`.
-//!
-//! The `hwsetid` and `hwfind` debug commands (servo ID programming over the CANmore debug console) aren't ported:
-//! the Rust boards don't serve the CANmore debug interface yet.
+//! * The `hwsetid` and `hwfind` remote commands ([`crate::remote_cmd`]) reach [`servo_task`] as deferred
+//!   requests and run on the bus between its scheduled packets.
 
 use core::cell::{Cell, RefCell};
 
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Ticker};
 use power_core::actuator::{self, Actuators, Command};
 use power_core::hiwonder::{self, MAX_PACKET_SIZE, ReadError};
 use titan_link::poac::{self, ActuatorStatus};
-use titan_rp2040::safety;
+use titan_rp2040::{control, safety};
 
 use crate::uart::MultidropUart;
 
@@ -83,7 +83,7 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-/// Drives the servo bus forever.
+/// Drives the servo bus forever, and runs the deferred remote commands on it.
 #[embassy_executor::task]
 pub async fn servo_task(mut uart: MultidropUart<'static>) -> ! {
     // init_servo: move home
@@ -93,7 +93,11 @@ pub async fn servo_task(mut uart: MultidropUart<'static>) -> ! {
     // The C ping timer started at nil time, so the first ping goes out straight away
     let mut next_ping = Instant::now();
     loop {
-        scheduler.next().await;
+        if let Either::Second(request) = select(scheduler.next(), control::next_deferred()).await {
+            crate::remote_cmd::run(request, &mut uart).await;
+            scheduler.reset();
+            continue;
+        }
 
         let now = Instant::now();
         if now >= next_ping {

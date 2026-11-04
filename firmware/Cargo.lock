@@ -1988,6 +1988,14 @@ name = "titan_build"
 version = "0.1.0"
 
 [[package]]
+name = "titan_control"
+version = "0.1.0"
+dependencies = [
+ "canmore",
+ "defmt 1.2.0",
+]
+
+[[package]]
 name = "titan_link"
 version = "0.1.0"
 dependencies = [
@@ -2004,6 +2012,7 @@ dependencies = [
  "canmore",
  "cortex-m",
  "cortex-m-rt",
+ "critical-section",
  "defmt 1.2.0",
  "embassy-executor",
  "embassy-futures",
@@ -2015,6 +2024,7 @@ dependencies = [
  "heapless",
  "portable-atomic",
  "smart-leds",
+ "titan_control",
  "titan_link",
  "titan_sensors",
 ]

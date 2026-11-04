@@ -10,9 +10,10 @@
 //!   [`link::INBOX`], messages from [`link::OUTBOX`] go out as datagrams (format in [`puddles_core::wire`])
 //! * the link status: [`link::mark_transport_online`] while the PHY reports link, which drives the yellow status
 //!   LED like `led_network_online_set(ethernet_check_online())`
-//! * the CANmore heartbeat, broadcast every 500 ms to port 2201 from port 2202 like `ethernet_tick`. It reports
-//!   control interface mode "none": the register mapped control interface on port 2202 isn't ported, so requests
-//!   arriving there are dropped (the CAN boards don't serve it either).
+//! * the CANmore heartbeat, broadcast every 500 ms to port 2201 from port 2202 like `ethernet_tick`, in control
+//!   interface mode Normal
+//! * the control interface on port 2202 ([`titan_rp2040::control`]), with multiword requests up to
+//!   [`CONTROL_MAX_LEN`] bytes like `debug_init(..., CANMORE_ETH_UDP_MAX_LEN)`
 
 use core::cell::Cell;
 use core::convert::Infallible;
@@ -32,10 +33,11 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
 
+use canmore::reg_mapped::Server;
 use canmore::{ControlInterfaceMode, Heartbeat};
 use puddles_core::wire::{self, MAX_DATAGRAM_LEN};
 use titan_rp2040::puddles::{ETHERNET_GATEWAY, ETHERNET_MASK, ROBOT_COMPUTER_IP};
-use titan_rp2040::{link, safety};
+use titan_rp2040::{control, link, safety};
 
 /// SPI clock of the W5500 (`spi_init(..., 30000000)` in `transport_eth_init`).
 pub const SPI_FREQUENCY: u32 = 30_000_000;
@@ -45,6 +47,8 @@ const MAC_PREFIX: [u8; 2] = [0x2A, 0xCD];
 /// (`CANMORE_ETH_CONTROL_INTERFACE_PORT`) ports from `canmore/ethernet_defs.h`.
 const HEARTBEAT_PORT: u16 = 2201;
 const CONTROL_INTERFACE_PORT: u16 = 2202;
+/// Largest control interface packet (`CANMORE_ETH_UDP_MAX_LEN`).
+pub const CONTROL_MAX_LEN: usize = 512;
 /// `ETH_HEARTBEAT_INTERVAL_MS`.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(canmore::HEARTBEAT_INTERVAL_MS);
 /// How often the link state is checked (`LED_UPTIME_INTERVAL_MS`).
@@ -143,7 +147,8 @@ pub async fn transport_task(stack: embassy_net::Stack<'static>) -> ! {
     // Where the bridge listens: its last datagram's source port, on the robot computer
     let bridge = Cell::new(IpEndpoint::new(IpAddress::Ipv4(ipv4(ROBOT_COMPUTER_IP)), wire::PORT));
     let (never, _, _) =
-        join3(receive(&link_socket, &bridge), send(&link_socket, &bridge, stack), status(stack, &control_socket)).await;
+        join3(receive(&link_socket, &bridge), send(&link_socket, &bridge, stack), status(stack, &mut control_socket))
+            .await;
     match never {}
 }
 
@@ -199,22 +204,32 @@ async fn send(socket: &UdpSocket<'_>, bridge: &Cell<IpEndpoint>, stack: embassy_
     }
 }
 
-/// Link status, CANmore heartbeat broadcasts, and dropping control interface requests.
-async fn status(stack: embassy_net::Stack<'static>, control: &UdpSocket<'_>) -> Infallible {
+/// Link status, CANmore heartbeat broadcasts and the control interface (`transport_eth` / `ethernet_tick`).
+async fn status(stack: embassy_net::Stack<'static>, control: &mut UdpSocket<'_>) -> Infallible {
     let broadcast = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::BROADCAST), HEARTBEAT_PORT);
-    let mut heartbeat = Heartbeat { mode: ControlInterfaceMode::None as u8, ..Heartbeat::default() };
+    let mut heartbeat = Heartbeat { mode: ControlInterfaceMode::Normal as u8, ..Heartbeat::default() };
+    let mut server = Server::new(ControlInterfaceMode::Normal as u8);
     let mut next_link_check = Instant::now();
     let mut next_heartbeat = Instant::now();
     let mut link_up = false;
-    let mut warned_control = false;
-    let mut request = [0u8; 128];
+    let mut request = [0u8; CONTROL_MAX_LEN];
+    let mut response = [0u8; CONTROL_MAX_LEN];
     loop {
-        if let Either::First(Ok((_, meta))) =
+        if let Either::First(Ok((len, meta))) =
             select(control.recv_from(&mut request), Timer::at(next_link_check.min(next_heartbeat))).await
-            && !warned_control
         {
-            defmt::warn!("Control interface request from {} dropped: not implemented", meta.endpoint);
-            warned_control = true;
+            let (resp_len, action) = control::serve(&mut server, &request[..len], &mut response).await;
+            if resp_len > 0
+                && let Err(err) = control.send_to(&response[..resp_len], meta.endpoint).await
+            {
+                defmt::warn!("Control interface response to {} failed: {}", meta.endpoint, err);
+            }
+            if action != control::Action::None {
+                // Let the W5500 put the response on the wire before resetting it with the chip
+                control.flush().await;
+                Timer::after_millis(5).await;
+            }
+            action.run();
         }
 
         let now = Instant::now();

@@ -3,7 +3,7 @@
 //! The C firmware is a rewrite of the controller bring-up that was still in progress: it puts both ST L99LD20
 //! controllers into active mode with PWM dimming at the normal peak current and keeps their watchdogs fed, but has
 //! no colour control yet. Its ROS node (`titan_bridge --board led2`) has only the standard `heartbeat`,
-//! `state/firmware` and `state/kill`.
+//! `state/firmware` and `state/kill`. Its CANmore remote commands are in [`commands`].
 //!
 //! Pins (`boards/talos/led_board.h`, same board as `led_board`): controller SPI1 on GPIO 10 (SCK), 11 (MOSI),
 //! 12 (MISO) with chip selects on GPIO 9 (LEDC1) and 6 (LEDC2), DIN1/DIN2 on GPIO 1/0 (left as inputs), the
@@ -12,6 +12,7 @@
 #![no_std]
 #![no_main]
 
+mod commands;
 mod ledc;
 
 use defmt_rtt as _;
@@ -44,6 +45,7 @@ async fn main(spawner: Spawner) {
             client_id: CLIENT_ID_LED_BOARD,
             bus: Bus::Internal,
             version: titan_rp2040::version!(),
+            remote_commands: &commands::COMMANDS,
             // safety_interface.h defines only the standard faults
             ..BoardConfig::DEFAULT
         },

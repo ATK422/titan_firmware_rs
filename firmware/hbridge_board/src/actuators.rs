@@ -5,11 +5,10 @@
 //! * [`actuator_task`] owns the servo state ([`hbridge_core::actuators`]). It runs the commands from ROS, the
 //!   answers from the UART, the stop of timed moves, and while ROS is connected the status (500 ms), command
 //!   feedback (100 ms) and position (30 ms) timers.
-//!
-//! The C debug console commands `hwsetid`, `hwfind` and `hwping` aren't ported: the CANmore debug interface they
-//! ran on doesn't exist in the Rust firmware yet.
+//! * The `hwsetid`, `hwfind` and `hwping` remote commands ([`crate::remote_cmd`]) reach [`uart_task`] as deferred
+//!   requests and run on the bus between the queued packets.
 
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
@@ -20,7 +19,7 @@ use hbridge_core::hiwonder::{self, MAX_PACKET_SIZE};
 use hbridge_core::timing::Interval;
 use titan_link::DeviceToHost;
 use titan_link::hbridge::{self, Feedback};
-use titan_rp2040::{link, safety};
+use titan_rp2040::{control, link, safety};
 
 use crate::multidrop::{self, MultidropUart};
 
@@ -65,13 +64,16 @@ fn enqueue(packet: Outgoing) {
     }
 }
 
-/// Sends queued packets and collects their answers.
+/// Sends queued packets and collects their answers, and runs the deferred remote commands on the bus.
 #[embassy_executor::task]
 pub async fn uart_task(mut uart: MultidropUart<'static>) -> ! {
     let mut next_tick = Instant::now() + SERVO_TRANSMIT_PERIOD;
     loop {
         // Ticks that pass during a transaction are skipped, like the C timer finding a packet in flight
-        Timer::at(next_tick).await;
+        if let Either::Second(request) = select(Timer::at(next_tick), control::next_deferred()).await {
+            crate::remote_cmd::run(request, &mut uart).await;
+            continue;
+        }
         let now = Instant::now();
         while next_tick <= now {
             next_tick += SERVO_TRANSMIT_PERIOD;

@@ -142,6 +142,7 @@ async fn main(spawner: Spawner) {
             on_kill,
             on_enable: kill::on_enable,
             on_board_message: handle_board_message,
+            remote_commands: &[],
         },
     );
 

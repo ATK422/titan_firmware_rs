@@ -7,6 +7,7 @@
 //! the unlock frame cleared buck 1's duty. The Rust port keeps the other fields, so the controllers end up as the C
 //! code intended: active (EN set, GOSTBY clear), PWM dimmed at the duties already in CR1, peak current 45.
 
+use embassy_futures::select::{Either, select};
 use embassy_rp::Peri;
 use embassy_rp::adc::{self, Adc};
 use embassy_rp::gpio::{Input, Output};
@@ -19,6 +20,9 @@ use fixed::FixedU16;
 use ledc_core::driver::Ledc;
 use ledc_core::l99ld20::{self, Buck, CR1, CR2, CR3, Chip, Cr1, Cr2, Cr3, DinMap};
 use ledc_core::thermal;
+use titan_rp2040::control;
+
+use crate::commands;
 
 /// Peak inductor current select for every buck (`BUCK_PEAK_CURRENT`).
 const PEAK_CURRENT: u8 = 45;
@@ -48,7 +52,7 @@ pub fn start_pwm_clock(slice: Peri<'static, PWM_SLICE3>, pin: Peri<'static, PIN_
 }
 
 /// `set_controllers_active_mode`: an unlock frame to each controller, then EN high and GOSTBY low.
-async fn set_active_mode(ledc: &mut Controllers) {
+pub async fn set_active_mode(ledc: &mut Controllers) {
     for chip in Chip::ALL {
         defmt::unwrap!(ledc.modify(chip, CR1, |cr1| Cr1(cr1).with_unlock(true).0));
     }
@@ -67,7 +71,7 @@ fn enable_dimming(ledc: &mut Controllers) {
 }
 
 /// `set_peak_current`.
-async fn set_peak_current(ledc: &mut Controllers) {
+pub async fn set_peak_current(ledc: &mut Controllers) {
     for chip in Chip::ALL {
         defmt::unwrap!(ledc.modify(chip, CR2, |cr2| {
             Cr2(cr2).with_peak_current(Buck::Buck1, PEAK_CURRENT).with_peak_current(Buck::Buck2, PEAK_CURRENT).0
@@ -76,7 +80,7 @@ async fn set_peak_current(ledc: &mut Controllers) {
     }
 }
 
-/// Logs what the C `leds` and `temp` debug commands printed; the CANmore debug commands are not ported yet.
+/// Logs at start-up what the C `leds` and `temp` debug commands print (see [`crate::commands`]).
 fn log_status(hw: &mut Hardware) {
     for chip in Chip::ALL {
         let (global, status) = defmt::unwrap!(hw.ledc.status(chip));
@@ -91,7 +95,8 @@ fn log_status(hw: &mut Hardware) {
     }
 }
 
-/// Brings the controllers up (`ledc_init`), then feeds their watchdogs forever (`pet_watchdog`).
+/// Brings the controllers up (`ledc_init`), then feeds their watchdogs forever (`pet_watchdog`), running the
+/// board's remote commands in between: the task owns the controller SPI and the thermistor ADC they use.
 #[embassy_executor::task]
 pub async fn ledc_task(mut hw: Hardware) -> ! {
     set_active_mode(&mut hw.ledc).await;
@@ -104,6 +109,9 @@ pub async fn ledc_task(mut hw: Hardware) -> ! {
         for chip in Chip::ALL {
             defmt::unwrap!(hw.ledc.toggle_watchdog(chip));
         }
-        ticker.next().await;
+        match select(ticker.next(), control::next_deferred()).await {
+            Either::First(()) => {}
+            Either::Second(request) => commands::run(&mut hw, request).await,
+        }
     }
 }

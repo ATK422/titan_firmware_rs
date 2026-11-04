@@ -10,7 +10,8 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Instant, Timer};
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::Vec;
 
 use dynamixel_protocol::control_table::{self, addr};
@@ -115,6 +116,59 @@ const RAM_ZERO: Ram = Ram {
 enum Command {
     Write { id: Id, address: u16, data: Vec<u8, MAX_WRITE_LEN> },
     ReadEeprom { id: Id },
+    Raw { id: Id, request: RawRequest },
+}
+
+/// The connection state of one tracked servo, for diagnostics (`dynamixel_schedule_get_state_array`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub struct LinkState {
+    pub id: Id,
+    /// The driver has tried to reach the servo at least once.
+    pub first_connect_attempted: bool,
+    pub connected: bool,
+    /// The servo's alert bit was set in its latest reply.
+    pub alert_notified: bool,
+}
+
+/// A one-off packet for debug commands (`dynamixel_schedule_raw_packet`), see [`Servos::raw_request`]. Unlike the
+/// command methods, its outcome goes back to the caller instead of the error callback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RawRequest {
+    Ping,
+    Reboot,
+    Write { address: u16, data: Vec<u8, MAX_WRITE_LEN> },
+}
+
+impl RawRequest {
+    /// A write of `data` at `address`; `None` if `data` is longer than [`MAX_WRITE_LEN`].
+    pub fn write(address: u16, data: &[u8]) -> Option<Self> {
+        Some(RawRequest::Write { address, data: Vec::from_slice(data).ok()? })
+    }
+}
+
+/// Most reply parameter bytes [`RawReply`] keeps.
+pub const RAW_REPLY_PARAMS: usize = 8;
+
+/// The servo's reply to a [`RawRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawReply {
+    /// How many parameter bytes the reply had.
+    pub param_len: usize,
+    /// The first [`RAW_REPLY_PARAMS`] of them.
+    pub params: Vec<u8, RAW_REPLY_PARAMS>,
+}
+
+/// Why [`Servos::raw_request`] got no reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub enum RawError {
+    /// An earlier raw request timed out and the driver hasn't finished it yet.
+    Outstanding,
+    /// The command queue is full.
+    QueueFull,
+    /// The driver didn't finish the request in time. It stays outstanding until it does.
+    Timeout,
+    /// The driver ran the request and it failed.
+    Driver(Error),
 }
 
 /// The servos on the bus and the command queue, shared between the [`Driver`] and the rest of the firmware.
@@ -123,6 +177,9 @@ pub struct Servos<const N: usize> {
     queue: Channel<CriticalSectionRawMutex, Command, MAX_COMMANDS>,
     /// An error from a command method, reported by the driver task on its next pass.
     caller_error: Mutex<CriticalSectionRawMutex, Cell<Option<Error>>>,
+    /// A raw request is queued or running.
+    raw_pending: Mutex<CriticalSectionRawMutex, Cell<bool>>,
+    raw_reply: Signal<CriticalSectionRawMutex, Result<RawReply, Error>>,
 }
 
 impl<const N: usize> Servos<N> {
@@ -138,6 +195,8 @@ impl<const N: usize> Servos<N> {
             states: Mutex::new(RefCell::new(states)),
             queue: Channel::new(),
             caller_error: Mutex::new(Cell::new(None)),
+            raw_pending: Mutex::new(Cell::new(false)),
+            raw_reply: Signal::new(),
         }
     }
 
@@ -169,6 +228,22 @@ impl<const N: usize> Servos<N> {
     /// The servo's present position (`dynamixel_get_position`).
     pub fn position(&self, id: Id) -> Option<i32> {
         self.ram(id).map(|ram| ram.present_position)
+    }
+
+    /// The connection state of every tracked servo, in polling order.
+    pub fn link_states(&self) -> [LinkState; N] {
+        self.states.lock(|states| {
+            let states = states.borrow();
+            core::array::from_fn(|i| {
+                let s = &states[i];
+                LinkState {
+                    id: s.id,
+                    first_connect_attempted: s.first_connect_attempted,
+                    connected: s.connected,
+                    alert_notified: s.alert_notified,
+                }
+            })
+        })
     }
 
     /// The tracked IDs, in polling order.
@@ -224,12 +299,37 @@ impl<const N: usize> Servos<N> {
     pub fn request_eeprom_rescan(&self, id: Id) -> bool {
         self.enqueue(Command::ReadEeprom { id })
     }
+
+    /// Sends `request` to servo `id` (any ID, tracked or not) ahead of the polling and waits up to `timeout` for
+    /// the reply (`dynamixel_schedule_raw_packet`, as the CANmore debug commands used it). One raw request runs at
+    /// a time; errors are returned, not passed to the error callback.
+    pub async fn raw_request(&self, id: Id, request: RawRequest, timeout: Duration) -> Result<RawReply, RawError> {
+        let busy = self.raw_pending.lock(|p| p.replace(true));
+        if busy {
+            return Err(RawError::Outstanding);
+        }
+        self.raw_reply.reset();
+        if self.queue.try_send(Command::Raw { id, request }).is_err() {
+            self.raw_pending.lock(|p| p.set(false));
+            return Err(RawError::QueueFull);
+        }
+        match with_timeout(timeout, self.raw_reply.wait()).await {
+            Ok(result) => result.map_err(RawError::Driver),
+            Err(_) => Err(RawError::Timeout),
+        }
+    }
+
+    fn finish_raw(&self, result: Result<RawReply, Error>) {
+        self.raw_reply.signal(result);
+        self.raw_pending.lock(|p| p.set(false));
+    }
 }
 
 /// A request to send.
 #[derive(Clone, Copy)]
 enum Request<'a> {
     Ping,
+    Reboot,
     Read { address: u16, length: u16 },
     Write { address: u16, data: &'a [u8] },
 }
@@ -358,6 +458,7 @@ impl<'d, PIO: PioRegs, const SM: usize, const TX_IRQ: usize, const ERR_IRQ: usiz
         let buf = &mut self.tx_buf;
         let built = match request {
             Request::Ping => packet::ping(buf, id),
+            Request::Reboot => packet::reboot(buf, id),
             Request::Read { address, length } => packet::read(buf, id, address, length),
             Request::Write { address, data } => packet::write(buf, id, address, data),
         };
@@ -403,6 +504,24 @@ impl<'d, PIO: PioRegs, const SM: usize, const TX_IRQ: usize, const ERR_IRQ: usiz
                         on_error(error);
                     }
                 }
+            }
+            Command::Raw { id, request } => {
+                let request = match &request {
+                    RawRequest::Ping => Request::Ping,
+                    RawRequest::Reboot => Request::Reboot,
+                    RawRequest::Write { address, data } => Request::Write { address: *address, data },
+                };
+                let result = self.request(id, request, Source::Comms).await.map(|packet| {
+                    let kept = packet.params.len().min(RAW_REPLY_PARAMS);
+                    RawReply {
+                        param_len: packet.params.len(),
+                        params: Vec::from_slice(&packet.params[..kept]).unwrap_or_default(),
+                    }
+                });
+                if let Err(error) = &result {
+                    defmt::debug!("Error executing raw request to {}: {}", id, error);
+                }
+                self.servos.finish_raw(result);
             }
         }
     }

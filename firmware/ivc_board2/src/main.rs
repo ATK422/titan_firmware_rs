@@ -15,6 +15,9 @@
 //!   `ivc/rx_sample_snr_stream`
 //! * plus the standard `heartbeat`, `state/firmware` and `state/kill`
 //!
+//! CANmore remote commands (`canmore.c`): `write_lock`, `tx_queue_empty`, `receiving_packet`, `set_comms_mode` and
+//! `set_pinger_mode`; see [`modem::COMMANDS`].
+//!
 //! Pins (`boards/talos/ivc_board.h`): transducer drive on GPIO 7, filter output select on GPIO 3, board ID on GPIO 6.
 //! The hydrophone is read on ADC 1 (GPIO 27): the C `fft.c` samples `CAPTURE_CHANNEL` 1, not the header's `RX_PIN`.
 //!
@@ -58,6 +61,7 @@ async fn main(spawner: Spawner) {
             version: titan_rp2040::version!(),
             // No actuators to disable; the status LED follows the kill state on its own
             on_board_message: modem::handle_board_message,
+            remote_commands: &modem::COMMANDS,
             ..BoardConfig::DEFAULT
         },
     );

@@ -40,6 +40,7 @@ use embassy_rp::pwm::Pwm;
 use embassy_rp::spi::{self, Spi};
 use embassy_rp::{bind_interrupts, dma};
 
+use titan_rp2040::control;
 use titan_rp2040::drivers::depth::{Model, Ms5837};
 use titan_rp2040::led::{self, StatusLed};
 use titan_rp2040::link::{self, LinkConfig};
@@ -142,6 +143,8 @@ async fn main(spawner: Spawner) {
     if flash.blocking_unique_id(&mut unique_id).is_err() {
         defmt::warn!("Couldn't read the flash unique ID; using a fixed MAC address");
     }
+    // The control interface reads the ID as two little-endian words, like C
+    control::init(BOARD_NAME, version, u64::from_le_bytes(unique_id), &[], &[]);
     let mut spi_config = spi::Config::default();
     spi_config.frequency = ethernet::SPI_FREQUENCY;
     let spi = Spi::new(p.SPI0, p.PIN_2, p.PIN_3, p.PIN_0, p.DMA_CH0, p.DMA_CH1, Irqs, spi_config);

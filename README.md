@@ -69,7 +69,7 @@ unless a board's `main.rs` says otherwise (IDs 0-4 are fixed by the Rust safety 
 | `firmware/titan_rp2040` | Safety, status LED, MCP2517FD driver, CANmore client, link task, one-call board bring-up, shared drivers (SHT41, MCP3426, MS5837 depth, CD74HC4051, WS2812 status strip) | `titan_safety`, `driver_led`, `driver_canbus`, `micro_ros_pico`, the `driver_*` sensors, template `main.c`/`ros.c` |
 | `firmware/<board>` | One crate per board (table above) | `talos/*`, `puddles/*`, `lilboat/*`, `SBCBoard` |
 | `firmware/dynamixel` | Async Dynamixel servo driver | `driver_dynamixel` |
-| `crates/titan_control` | Control interface register maps (debug, remote commands, bootloader), not yet wired into firmware | `titan_debug`, `titan_bootloader` |
+| `crates/titan_control` | Control interface register maps (debug, remote commands, bootloader) and the crash log, served by `titan_rp2040::control` / `crash` | `titan_debug`, `titan_bootloader`, `crash_reporting.c` |
 | `crates/canmore` | CANmore IDs, CRC-18, message fragmentation, heartbeat, register-mapped protocol client and server (`no_std`) | `titan_canmore` |
 | `crates/titan_link` | Firmware ⇄ bridge protocol, one module per board (`no_std`, serde + postcard) | the micro-ROS message set in each `ros.c` |
 | `crates/titan_sensors` | Sensor math: CRCs, MS5837 compensation, conversions | inside the `driver_*` sensors |
@@ -110,21 +110,25 @@ cargo test -p titan_bridge
 
 With an SWD probe (logs stream over defmt/RTT):
 
+Images are linked behind the C Titan bootloader, as the C applications are (boot2 at 0x10004000, vector table at
+0x10004100), so the board needs the bootloader in its first 16 KiB. A board that came from the C firmware has it;
+on a blank board, flash a C `*_with_bl.uf2` (or the bootloader alone) once with `upload_tool -f`. Then:
+
 ```bash
 cd firmware
 cargo run -p <board crate> --release
 ```
 
-That uses `probe-rs run --chip RP2040` (see `firmware/.cargo/config.toml`). Without a probe, hold BOOTSEL and flash
-over USB with the Rust upload tool, which reads ELF files directly:
+That uses `probe-rs run --chip RP2040` (see `firmware/.cargo/config.toml`). Without a probe, flash the ELF over CAN,
+Ethernet or USB (BOOTSEL) with the Rust upload tool, which reads ELF files directly and treats them as OTA images:
 
 ```bash
 cargo run -p upload_tool -- -b talos/ivc_board firmware/target/thumbv6m-none-eabi/release/ivc_board
 ```
 
-`-b` names the board, because Rust firmware carries no pico-sdk binary info for auto-detection. `picotool load -u
--v -x -t elf <elf>` from `riptide-shell` works too. Flashing over CAN or Ethernet needs the bootloader; see
-[Control interface and bootloader](#control-interface-and-bootloader).
+`-b` names the board, because Rust firmware carries no pico-sdk binary info for auto-detection. Over CAN the board
+is reached through its control interface, which reboots it into the bootloader. To run on a board without the
+bootloader, build with `TITAN_BOOTLOADER=0`, which links at the start of flash as before.
 
 ## Running the bridge
 
@@ -153,11 +157,26 @@ UDP port 2203 at both ends: one datagram is the bytes `TL` followed by one postc
 
 ## Control interface and bootloader
 
-Not finished. `crates/titan_control` has the portable, host-tested half: the debug register map served in Normal
-mode (version, uptime, reboot, enter bootloader, faults, crash log, memory access, remote commands) and the
-bootloader register map with its flash layout and image check. It isn't wired into `titan_rp2040` or a bootloader
-firmware yet, so Rust boards still report control interface mode `None` in their CANmore heartbeat, and
-`canmore_cli` and CAN/Ethernet uploads only work with C firmware and the C bootloader.
+Every board serves the CANmore control interface in Normal mode like `titan_debug` (`titan_rp2040::control`, on top
+of the host-tested register map in `crates/titan_control`): on CAN utility channel 14 (classic frames, no multiword,
+as C) and, on Puddles, UDP port 2202 (multiword up to 512 bytes). The heartbeat reports mode Normal, and
+`canmore_cli` and `upload_tool` work as with C firmware: version, uptime, reboot, enter bootloader, faults (raise,
+lower, names, records), the crash log, gdb memory access, and remote commands. The commands are `help`, `memstats`
+(statics and stack; there is no heap), `candbg` on CAN boards, and the board commands of the C boards (Actuator V2,
+PoAC, HBridge, LEDBoard2, IVCBoard2, IVCDAC). Board commands that need async drivers are deferred to a board task
+(`control::next_deferred`) and time out after 1 s.
+
+There is no Rust bootloader: the C `titan_bootloader` runs the Rust applications, which are linked for it. Entering
+the bootloader writes its scratch 4 magic and resets, as `safety_enter_bootloader` does.
+
+The crash log is the C one (`titan_rp2040::crash`, `titan_control::crash_log`): watchdog scratch 0-2 hold what the
+firmware is doing (`UNKNOWN_SAFETY_PREINIT` / `ACTIVE`) or the crash being taken (`PANIC`, `HARD_FAULT` with the
+faulting PC, `WATCHDOG_TIMEOUT` with the interrupted PC from an NMI 1 µs before the watchdog fires, `CORE1_TIMEOUT`),
+and a 24-entry CRC-checked log in `.uninit` RAM keeps the resets with their faults and uptime (SysTick, 10 ms ticks).
+The boot log line and `canmore_cli`'s crash log read the same as with C. Differences: a panic stores the address of
+its file name and its line (Rust has no message address or caller to store); `CORE1_TIMEOUT` stores the
+milliseconds since core 1's last check-in rather than its PC; core 1 isn't halted by a crash on core 0; the
+profiler (`profiler_dump`) isn't ported; and the version string has no robot, builder or build date.
 
 ## Differences from the C firmware
 
@@ -168,8 +187,8 @@ happen (module docs and comments); the ones you are most likely to notice:
 * **ROS on the host.** Topics are served by `titan_bridge`, so message stamps come from the bridge's clock instead
   of `rmw_uros_epoch_nanos`, and Rust boards always use CAN (IVCBoard2/IVCDAC used the micro-ROS USB transport).
 * **Logging** goes out over defmt/RTT instead of UART0 stdio.
-* **Crash log** is smaller: watchdog scratch registers 0-3 hold the panic and watchdog-timeout counts, the uptime and
-  the faults active at the reset. A panic forces a watchdog reset, so the next boot raises `FAULT_WATCHDOG_RESET`.
+* **Crash log** follows C (see [Control interface and bootloader](#control-interface-and-bootloader)), with the
+  small differences listed there.
 * **Fixed C bugs** are listed in each board's docs. The ones that change behaviour on the robot:
   * ESC: utility-frame thruster commands are decoded as documented big-endian values (C used the high byte twice);
     the controller's feed-forward no longer overflows above ~7150 RPM.
@@ -208,3 +227,7 @@ type support and DDS. No board, CAN bus or USB device was available, so check th
 * **Smart battery:** the ~2 ms power-latch release during `embassy_rp::init`, gauge communication, display
 * **Puddles:** which WIZnet chip is fitted (a W5200 needs a native driver), DShot timing, Ethernet link
 * **Camera cage:** status strip orientation; depth surface pressure surviving a watchdog reset (`.uninit` RAM)
+* **Control interface and crash log:** `canmore_cli` and `upload_tool` over real CAN and Ethernet, the C
+  bootloader starting a Rust image and taking it back over (`enter bootloader`, OTA upload), and the
+  `WATCHDOG_TIMEOUT` NMI firing before the watchdog (the emulator doesn't model the NMI mask, so it reports such a
+  hang as `UNKNOWN_SAFETY_*`, as it does for C)

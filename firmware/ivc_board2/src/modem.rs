@@ -5,6 +5,7 @@
 //! active (pinger, flash recorder or comms), and [`tx_task`] owns the transducer and plays packets and debug tones.
 
 use core::cell::Cell;
+use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_futures::select::{Either, select};
@@ -26,6 +27,7 @@ use ivc2_core::storage::StorageMode;
 use ivc2_core::tx::packet_slots;
 use ivc2_core::{DEBUG_TONE_MS, DEFAULT_MIN_SNR, NUM_SAMPLES, SYMBOL_PERIOD_MS, Symbol, TX_QUEUE_DEPTH};
 use titan_link::{DeviceToHost, HostToDevice, ivc2};
+use titan_rp2040::control::{Args, Command, Response};
 use titan_rp2040::link;
 
 use crate::hw::{Hydrophone, Transmitter};
@@ -61,6 +63,8 @@ static TX_QUEUE: Channel<CriticalSectionRawMutex, u8, TX_QUEUE_DEPTH> = Channel:
 static TX_PACKET: Signal<CriticalSectionRawMutex, u8> = Signal::new();
 /// Set while a packet is being transmitted (`tx.flags.is_writing`).
 static WRITING: AtomicBool = AtomicBool::new(false);
+/// Mirror of the receiver's state after each comms pass (`rx.flags.receiving_packet`), for `receiving_packet`.
+static RECEIVING: AtomicBool = AtomicBool::new(false);
 static DEBUG_TONE: Signal<CriticalSectionRawMutex, Symbol> = Signal::new();
 
 const SYMBOL_PERIOD: Duration = Duration::from_millis(SYMBOL_PERIOD_MS);
@@ -174,7 +178,9 @@ pub async fn rx_task(mut hydrophone: Hydrophone, mut recorder: Recorder) -> ! {
         let magnitudes = analyzer.measure(&comms_bands);
         consensus.update(detect::observe(&magnitudes, analyzer.noise_floor(), settings.min_snr));
 
-        if let Some(data) = receiver.poll(&mut consensus, WRITING.load(Ordering::Relaxed)) {
+        let received = receiver.poll(&mut consensus, WRITING.load(Ordering::Relaxed));
+        RECEIVING.store(receiver.is_receiving(), Ordering::Relaxed);
+        if let Some(data) = received {
             defmt::info!("packet read complete with: {=u8:#x}", data);
             if !link::send(&DeviceToHost::Ivc2(ivc2::DeviceToHost::RxNew(data))) {
                 defmt::warn!("Dropped received IVC byte {=u8:#x}, CAN queue full", data);
@@ -202,4 +208,82 @@ async fn capture(hydrophone: &mut Hydrophone, samples: &mut [u8; NUM_SAMPLES]) -
             false
         }
     }
+}
+
+// ========================================
+// CANmore remote commands (`canmore.c`)
+// ========================================
+
+/// The board's remote commands, in `register_canmore_commands` order. All are synchronous: they read the modem's
+/// flags or change [`SETTINGS`], the same path as the bridge's `ivc/pinger/*` messages, which [`rx_task`] picks up
+/// on its next pass.
+///
+/// The C callbacks were `void` functions cast to the `int` callback type, so their return code was whatever was left
+/// in r0; these return 0 on success and 1 on an error.
+pub static COMMANDS: [Command; 5] = [
+    Command::new("write_lock", "", "get the status of the write lock bool", write_lock),
+    Command::new("tx_queue_empty", "", "see if the tx queue is empty", tx_queue_empty),
+    Command::new("receiving_packet", "", "check if the receiving packet flag is set", receiving_packet),
+    Command::new("set_comms_mode", "", "set IVC to listen for comms signals", set_comms_mode),
+    Command::new(
+        "set_pinger_mode",
+        "[pinger freq in khz (20, 25, 30, 35, 40)]",
+        "will set ivc to listen for that frequency\n",
+        set_pinger_mode,
+    ),
+];
+
+fn bool_str(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+/// `tx.flags.is_writing`: here [`WRITING`], set from the moment a byte is handed to [`tx_task`] until its packet
+/// has been played.
+fn write_lock(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "is_writing: [{}]", bool_str(WRITING.load(Ordering::Relaxed)));
+    0
+}
+
+/// `tx_queue_empty()`. A byte already handed to [`tx_task`] has left the queue, as in C once it was dequeued.
+fn tx_queue_empty(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "empty: [{}]", bool_str(TX_QUEUE.is_empty()));
+    0
+}
+
+/// `rx.flags.receiving_packet`: the receiver lives in [`rx_task`], which mirrors it into [`RECEIVING`] after every
+/// comms pass. Like the C flag it keeps its last value while the pinger or recorder mode is on.
+fn receiving_packet(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "receiving_packet: [{}]", bool_str(RECEIVING.load(Ordering::Relaxed)));
+    0
+}
+
+/// Clears `rx.flags.is_pinger_mode`, like `ivc/pinger/enable` false.
+fn set_comms_mode(_args: &Args<'_>, _out: &mut Response<'_>) -> i32 {
+    update_settings(|s| s.pinger_enabled = false);
+    0
+}
+
+/// Selects the pinger frequency (`rx.pinger_mode`) without turning the pinger mode on, like C.
+///
+/// C checked `argc != 1`, but its `argc` counts the command name, so the command always failed; this takes exactly
+/// one argument as the usage says. Only the five listed frequencies are accepted, by exact text like C's `strcmp`
+/// (37 kHz stays reachable through `ivc/pinger/set_freq_khz`).
+fn set_pinger_mode(args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let (2, Some(arg)) = (args.len(), args.get(1)) else {
+        let _ = writeln!(out, "ERROR: arg must be exactly one of [ 20 | 25 | 30 | 35 | 40 ]");
+        return 1;
+    };
+    let freq = match arg {
+        "20" => PingerFreq::K20,
+        "25" => PingerFreq::K25,
+        "30" => PingerFreq::K30,
+        "35" => PingerFreq::K35,
+        "40" => PingerFreq::K40,
+        _ => {
+            let _ = writeln!(out, "ERROR: <{arg}> is unrecognized");
+            return 1;
+        }
+    };
+    update_settings(|s| s.pinger_freq = freq);
+    0
 }

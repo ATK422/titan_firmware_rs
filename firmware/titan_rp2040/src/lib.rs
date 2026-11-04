@@ -1,6 +1,7 @@
 //! Shared embassy support for UWRT RP2040 boards, the Rust counterpart of the C `titan_*` and `driver_*` libraries.
 //!
-//! * [`safety`]: fault tracking, kill switches, watchdog and crash records (`titan_safety`)
+//! * [`safety`]: fault tracking, kill switches and watchdog (`titan_safety`), with [`crash`] keeping the crash log
+//! * [`control`]: the CANmore control interface for `canmore_cli` and `upload_tool` (`titan_debug`)
 //! * [`led`]: the RGB status LED (`driver_led`)
 //! * [`mcp251xfd`] and [`canbus`]: the MCP2517FD CAN controller and the CANmore client on top of it
 //!   (`driver_canbus`)
@@ -15,6 +16,8 @@
 
 pub mod board;
 pub mod canbus;
+pub mod control;
+pub mod crash;
 pub mod drivers;
 pub mod led;
 pub mod link;

@@ -7,18 +7,22 @@
 //!   timed out. Switches are only honoured once [`init`] runs (when ROS connects); [`deinit`] kills.
 //! * **Watchdog**: [`safety_task`] feeds the hardware watchdog every [`TICK`]. A task that hogs the executor stops
 //!   the feeding and resets the chip. The timeout is 3 s before ROS connects and 250 ms after.
-//! * **Crash records**: the fault list and uptime are mirrored into watchdog scratch registers so the reason for a
-//!   watchdog or panic reset can be reported on the next boot.
+//! * **Crash log**: [`crate::crash`] records why the chip reset (watchdog scratch registers plus a log in RAM, as
+//!   `crash_reporting.c`); [`setup`] reports the previous reset and raises [`FAULT_WATCHDOG_RESET`] after a crash.
 
 use core::cell::{Cell, RefCell};
 
 use embassy_rp::Peri;
 use embassy_rp::peripherals::WATCHDOG;
-use embassy_rp::watchdog::{ResetReason, Watchdog};
+use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Ticker};
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
+use titan_control::crash_log::reason;
+use titan_control::debug::{CrashCounts, FaultRecord as DebugFaultRecord};
+
+use crate::crash;
 
 /// The watchdog reset the chip (or a panic forced a reset) on the previous run.
 pub const FAULT_WATCHDOG_RESET: u8 = 0;
@@ -57,14 +61,6 @@ const WATCHDOG_SETUP_TIMEOUT: Duration = Duration::from_millis(3000);
 const WATCHDOG_ACTIVE_TIMEOUT: Duration = Duration::from_millis(250);
 const WATCHDOG_SETUP_WARN_MARGIN: Duration = Duration::from_millis(500);
 const WATCHDOG_ACTIVE_WARN_MARGIN: Duration = Duration::from_millis(50);
-
-// Watchdog scratch registers 0-3 hold the crash record. 4-7 belong to the boot ROM.
-const SCRATCH_RECORD: usize = 0;
-const SCRATCH_FAULTS: usize = 1;
-const SCRATCH_UPTIME: usize = 2;
-const SCRATCH_PANIC: usize = 3;
-const RECORD_MAGIC: u32 = 0x7174;
-pub(crate) const PANIC_MARKER: u32 = 0x9A41_C0DE;
 
 /// Board specific safety configuration.
 pub struct SafetyConfig {
@@ -120,22 +116,13 @@ static FAULT_NAMES: Mutex<CriticalSectionRawMutex, Cell<&'static [&'static str]>
 type Hooks = (fn(), fn());
 static HOOKS: Mutex<CriticalSectionRawMutex, Cell<Hooks>> = Mutex::new(Cell::new((noop, noop)));
 
+static IS_SETUP: AtomicBool = AtomicBool::new(false);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static KILL: Mutex<CriticalSectionRawMutex, RefCell<KillState>> = Mutex::new(RefCell::new(KillState {
     switches: [KillSwitch::DISABLED; MAX_KILL_SWITCHES],
     asserting_kill: true,
     last_change: Instant::MIN,
 }));
-
-static CRASH_COUNTS: Mutex<CriticalSectionRawMutex, Cell<CrashCounts>> =
-    Mutex::new(Cell::new(CrashCounts { watchdog_timeouts: 0, panics: 0 }));
-
-/// Resets recorded since power on.
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct CrashCounts {
-    pub watchdog_timeouts: u8,
-    pub panics: u8,
-}
 
 // ========================================
 // Faults
@@ -162,7 +149,7 @@ pub fn raise_fault(id: u8, extra: u32) {
             line: location.line(),
             multiple_fires: previous.is_some(),
         });
-        FAULT_LIST.fetch_or(1 << id, Ordering::Relaxed);
+        crash::mirror_faults(FAULT_LIST.fetch_or(1 << id, Ordering::Relaxed) | 1 << id);
         !was_raised
     });
     if newly_raised {
@@ -179,7 +166,12 @@ pub fn raise_fault(id: u8, extra: u32) {
 /// Lowers a fault. Its record stays available for debugging.
 pub fn lower_fault(id: u8) {
     assert!(id <= MAX_FAULT_ID, "invalid fault id");
-    if FAULT_LIST.fetch_and(!(1 << id), Ordering::Relaxed) & (1 << id) != 0 {
+    let previous = critical_section::with(|_| {
+        let previous = FAULT_LIST.fetch_and(!(1 << id), Ordering::Relaxed);
+        crash::mirror_faults(previous & !(1 << id));
+        previous
+    });
+    if previous & (1 << id) != 0 {
         defmt::info!("Fault {} lowered", fault_name(id));
     }
 }
@@ -187,6 +179,19 @@ pub fn lower_fault(id: u8) {
 /// Bitmask of the currently raised faults.
 pub fn faults() -> u32 {
     FAULT_LIST.load(Ordering::Relaxed)
+}
+
+/// What was recorded the last time fault `id` was raised, if it ever was.
+pub fn fault_record(id: u8) -> Option<DebugFaultRecord> {
+    FAULT_RECORDS.lock(|records| {
+        records.borrow().get(id as usize).copied().flatten().map(|r| DebugFaultRecord {
+            time_us: r.time.as_micros(),
+            extra: r.extra,
+            file: r.file,
+            line: r.line,
+            multiple_fires: r.multiple_fires,
+        })
+    })
 }
 
 /// Logs every fault that has ever fired, like `safety_print_crash_log` did for the fault table.
@@ -324,53 +329,27 @@ pub fn setup(watchdog: Peri<'static, WATCHDOG>, config: SafetyConfig) -> Safety 
     FAULT_NAMES.lock(|names| names.set(config.fault_names));
     HOOKS.lock(|hooks| hooks.set((config.on_kill, config.on_enable)));
 
-    let mut watchdog = Watchdog::new(watchdog);
-    let reason = watchdog.reset_reason();
-    let record = watchdog.get_scratch(SCRATCH_RECORD);
-    let mut counts = if record >> 16 == RECORD_MAGIC {
-        CrashCounts { watchdog_timeouts: (record & 0xFF) as u8, panics: (record >> 8) as u8 }
-    } else {
-        CrashCounts { watchdog_timeouts: 0, panics: 0 }
-    };
-    let valid_record = record >> 16 == RECORD_MAGIC;
-    let last_faults = watchdog.get_scratch(SCRATCH_FAULTS);
-    let last_uptime = watchdog.get_scratch(SCRATCH_UPTIME);
-    let panicked = watchdog.get_scratch(SCRATCH_PANIC) == PANIC_MARKER;
-
-    match reason {
-        Some(ResetReason::Forced) if panicked => {
-            counts.panics = counts.panics.wrapping_add(1);
-            defmt::error!("Reset by panic after {} ms (faults {=u32:#x})", last_uptime, last_faults);
-            raise_fault(FAULT_WATCHDOG_RESET, last_faults);
-        }
-        Some(ResetReason::TimedOut) if valid_record => {
-            counts.watchdog_timeouts = counts.watchdog_timeouts.wrapping_add(1);
-            defmt::error!("Watchdog timeout after {} ms (faults {=u32:#x})", last_uptime, last_faults);
-            raise_fault(FAULT_WATCHDOG_RESET, last_faults);
-        }
-        Some(ResetReason::TimedOut) => {
-            defmt::error!("Watchdog timeout with no crash record");
-            raise_fault(FAULT_WATCHDOG_RESET, 0);
-        }
-        _ => {}
+    if crash::setup().raise_watchdog_reset {
+        raise_fault(FAULT_WATCHDOG_RESET, 0);
     }
-    CRASH_COUNTS.lock(|c| c.set(counts));
-    defmt::info!("Crash counts since power on: {}", counts);
 
-    watchdog.set_scratch(
-        SCRATCH_RECORD,
-        RECORD_MAGIC << 16 | (counts.panics as u32) << 8 | counts.watchdog_timeouts as u32,
-    );
-    watchdog.set_scratch(SCRATCH_PANIC, 0);
+    let mut watchdog = Watchdog::new(watchdog);
     watchdog.pause_on_debug(true);
     watchdog.start(WATCHDOG_SETUP_TIMEOUT);
+    crash::mark_watchdog_enabled();
+    IS_SETUP.store(true, Ordering::Relaxed);
 
     Safety { watchdog }
 }
 
-/// Resets recorded since power on.
+/// Crashes recorded since the last clean boot.
 pub fn crash_counts() -> CrashCounts {
-    CRASH_COUNTS.lock(Cell::get)
+    crash::crash_data().counts()
+}
+
+/// True once [`setup`] has run.
+pub fn is_setup() -> bool {
+    IS_SETUP.load(Ordering::Relaxed)
 }
 
 /// True once [`init`] has run and kill switches are being honoured.
@@ -381,6 +360,7 @@ pub fn is_initialized() -> bool {
 /// Starts honouring kill switches and tightens the watchdog. Called by the link when ROS connects.
 pub fn init() {
     KILL.lock(|state| state.borrow_mut().last_change = Instant::now());
+    crash::set_reason(reason::UNKNOWN_SAFETY_ACTIVE);
     INITIALIZED.store(true, Ordering::Relaxed);
 }
 
@@ -388,9 +368,10 @@ pub fn init() {
 pub fn deinit() {
     INITIALIZED.store(false, Ordering::Relaxed);
     KILL.lock(|state| handle_kill(&mut state.borrow_mut()));
+    crash::set_reason(reason::UNKNOWN_SAFETY_PREINIT);
 }
 
-/// Runs the safety tick forever: kill switch timeouts, crash record and watchdog.
+/// Runs the safety tick forever: kill switch timeouts and the watchdog, with its NMI armed just ahead of it.
 #[embassy_executor::task]
 pub async fn safety_task(mut safety: Safety) -> ! {
     let mut ticker = Ticker::every(TICK);
@@ -404,9 +385,6 @@ pub async fn safety_task(mut safety: Safety) -> ! {
             refresh_kill_switches();
         }
 
-        safety.watchdog.set_scratch(SCRATCH_FAULTS, faults());
-        safety.watchdog.set_scratch(SCRATCH_UPTIME, now.as_millis() as u32);
-
         let (new_timeout, margin) = if is_initialized() {
             (WATCHDOG_ACTIVE_TIMEOUT, WATCHDOG_ACTIVE_WARN_MARGIN)
         } else {
@@ -417,6 +395,7 @@ pub async fn safety_task(mut safety: Safety) -> ! {
             let remaining = timeout.checked_sub(elapsed).unwrap_or(Duration::from_ticks(0));
             raise_fault(FAULT_WATCHDOG_WARNING, remaining.as_micros() as u32);
         }
+        crash::arm_watchdog_nmi(new_timeout.as_micros() as u32);
         safety.watchdog.feed(new_timeout);
         timeout = new_timeout;
         last_feed = now;

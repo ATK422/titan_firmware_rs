@@ -8,6 +8,8 @@
 //! * [`bootloader`]: the register map of the CAN/Ethernet bootloader (`bl_server.c`), the flash layout shared by the
 //!   bootloader and applications linked for it, and the application image check (`boot_app.c`). The flash access
 //!   goes through [`bootloader::FlashBackend`].
+//! * [`crash_log`]: the crash log kept across resets and the watchdog scratch register protocol behind it
+//!   (`crash_reporting.c`).
 //! * [`memory`]: the address ranges the gdb stub may touch.
 //! * [`crc32`]: the CANmore CRC-32 (CRC-32/MPEG-2), also used by the RP2040 boot2 checksum.
 //!
@@ -17,6 +19,7 @@
 #![no_std]
 
 pub mod bootloader;
+pub mod crash_log;
 pub mod crc32;
 pub mod debug;
 pub mod memory;

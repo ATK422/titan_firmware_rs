@@ -26,6 +26,8 @@
 #![no_main]
 
 mod control;
+#[cfg(not(feature = "v1"))]
+mod dynamixel_cmds;
 #[cfg(feature = "v1")]
 mod v1;
 #[cfg(not(feature = "v1"))]
@@ -112,6 +114,9 @@ async fn main(spawner: Spawner) {
             on_kill,
             // The status LED follows the kill state on its own; nothing else to restore
             on_board_message: control::handle_board_message,
+            // The C board registered remote commands only with the V2 actuators
+            #[cfg(not(feature = "v1"))]
+            remote_commands: &v2::REMOTE_COMMANDS,
             ..BoardConfig::DEFAULT
         },
     );

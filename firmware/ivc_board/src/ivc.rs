@@ -65,7 +65,12 @@ pub fn handle_board_message(msg: HostToDevice) {
     }
 }
 
-/// Continuously captures [`NUM_SAMPLES`] 8-bit samples at 500 kS/s (one window per millisecond).
+/// How long the ADC settles after it is configured before the first capture (`sleep_ms(1000)` in `fft_setup`).
+const ADC_SETTLE: Duration = Duration::from_millis(1000);
+
+/// Continuously captures [`NUM_SAMPLES`] 8-bit samples at 500 kS/s (one window per millisecond), starting
+/// [`ADC_SETTLE`] after boot like C. C slept in `ivc_init`, before CAN came up, which also held off the CAN
+/// heartbeat for that second; here only the capture waits.
 #[embassy_executor::task]
 pub async fn sampler_task(
     mut adc: Adc<'static, adc::Async>,
@@ -74,6 +79,7 @@ pub async fn sampler_task(
 ) -> ! {
     let sender = CAPTURES.sender();
     let mut samples = [0u8; NUM_SAMPLES];
+    Timer::after(ADC_SETTLE).await;
     loop {
         // A divider of 0 runs conversions back to back: 48 MHz / 96 cycles = 500 kS/s
         match adc.read_many(&mut input, &mut samples, 0, &mut dma).await {

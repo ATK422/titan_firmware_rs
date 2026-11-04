@@ -6,8 +6,9 @@
 //! The C SIO FIFO plus spin lock protected shared memory become [`REQUESTS`] and the reply signals, all
 //! `CriticalSectionRawMutex` based (the RP2040 critical section is a hardware spin lock, so it works across cores).
 //!
-//! Core 1 checks in every loop; [`core1_watchdog_task`] on core 0 panics (resetting the chip) if it stops for
-//! [`CORE1_CHECKIN_INTERVAL`], replacing `safety_core1_checkin` with `SAFETY_CORE1_CHECKIN_INTERVAL_MS=1000`.
+//! Core 1 checks in every loop; [`core1_watchdog_task`] on core 0 resets the chip with a `CORE1_TIMEOUT` crash record
+//! if it stops for [`CORE1_CHECKIN_INTERVAL`], replacing `safety_core1_checkin` with
+//! `SAFETY_CORE1_CHECKIN_INTERVAL_MS=1000`.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -104,8 +105,10 @@ pub async fn core1_watchdog_task() -> ! {
         ticker.next().await;
         let last = CORE1_CHECKIN.load(Ordering::Relaxed);
         let now = Instant::now().as_millis() as u32;
-        if now.wrapping_sub(last) > CORE1_CHECKIN_INTERVAL.as_millis() as u32 {
-            panic!("Core 1 did not check in to safety within required interval");
+        let silent = now.wrapping_sub(last);
+        if silent > CORE1_CHECKIN_INTERVAL.as_millis() as u32 {
+            // Recorded as CORE1_TIMEOUT in the crash log, like `safety_internal_multicore_tick`
+            titan_rp2040::crash::core1_timeout(silent);
         }
     }
 }

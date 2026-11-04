@@ -6,6 +6,7 @@
 //! arming atomic with respect to a kill, as `save_and_disable_interrupts` did in C.
 
 use core::cell::RefCell;
+use core::fmt::Write;
 
 use embassy_executor::Spawner;
 use embassy_rp::Peri;
@@ -18,16 +19,21 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 
 use actuator_core::v2::{Actuators, CLAW_ID, MARKER_TORPEDO_ID, RamReport, SERVO_IDS, ServoBus};
+use canmore::reg_mapped::interface::debug::REMOTE_CMD_RESP_MAX_LEN;
 use dynamixel::uart::{HalfDuplexUart, MultidropProgram};
 use dynamixel::{Driver, Event, Id, Servos};
 use titan_link::DeviceToHost;
-use titan_link::actuator::{self, ActuatorError, Command, DynamixelStatus, Status, Variant};
+use titan_link::actuator::{
+    self, ActuatorError, ClawState, Command, DropperState, DynamixelStatus, Status, TorpedoState, Variant,
+};
+use titan_rp2040::control::{self, Args, Command as RemoteCommand, Response};
 use titan_rp2040::{link, safety};
 
+use crate::dynamixel_cmds::{self, parse_decimal};
 use crate::{FAULT_ACTUATOR_FAILURE, FAULT_ACTUATOR_HW_FAULT, FAULT_ACTUATOR_UNPLUGGED};
 
 /// The servos on the bus.
-static SERVOS: Servos<2> = Servos::new(SERVO_IDS);
+pub(crate) static SERVOS: Servos<2> = Servos::new(SERVO_IDS);
 /// The actuator state.
 static ACTUATORS: Mutex<CriticalSectionRawMutex, RefCell<Actuators>> = Mutex::new(RefCell::new(Actuators::new()));
 
@@ -106,6 +112,7 @@ pub fn init(spawner: Spawner, hw: Hardware<'_>) {
         dynamixel::BAUD_RATE,
     );
     spawner.spawn(dynamixel_task(Driver::new(uart, &SERVOS)).unwrap());
+    spawner.spawn(remote_command_task().unwrap());
 }
 
 #[embassy_executor::task]
@@ -228,3 +235,150 @@ pub fn send_extra_status() {
 
 /// Nothing to do on connect: V2 has no parameters.
 pub fn on_ros_connected() {}
+
+// ========================================
+// CANmore remote commands
+// ========================================
+
+/// The board's remote commands: `actuator` (`actuators_initialize`) and the Dynamixel driver's
+/// (`dynamixel_canmore_cmds_register`).
+pub static REMOTE_COMMANDS: [RemoteCommand; 7] = {
+    let dyn_cmds = dynamixel_cmds::commands();
+    [
+        RemoteCommand::new(
+            "actuator",
+            "[cmd]",
+            "Issues the requested actuator command\n===Command Options===\nGlobal Commands:\n  arm:\t\tArms the \
+             actuator system\n  disarm:\tDisarms the actuator system\n  status:\tReports global actuator \
+             state\nTorpedo/Marker Commands:\n  drop:\t\tDrops a marker dropper\n  fire:\t\tFires a torpedo\n  \
+             notifyreload:\tNotifies that the dropper/torpedo has been reloaded\n  gohome:\tSends the torpedo/marker \
+             to the home position\n  sethome:\tSets the torpedo/marker to the home position to the current \
+             position\nClaw Commands:\n  clawopen:\tOpen the claw\n  clawclose:\tClose the claw\n  setclosedpos\tSets \
+             the claw closed position to the current position\n  clawmove [d]:\tMoves the claw by [d] ticks",
+            actuator_cmd,
+        ),
+        dyn_cmds[0],
+        dyn_cmds[1],
+        dyn_cmds[2],
+        dyn_cmds[3],
+        dyn_cmds[4],
+        dyn_cmds[5],
+    ]
+};
+
+/// Runs the deferred remote commands (the ones that talk to a servo and wait for its reply).
+#[embassy_executor::task]
+async fn remote_command_task() -> ! {
+    let mut buf = [0u8; REMOTE_CMD_RESP_MAX_LEN];
+    loop {
+        let request = control::next_deferred().await;
+        let mut out = Response::new(&mut buf);
+        let rc = {
+            let args = request.args();
+            match dynamixel_cmds::run_deferred(&args, &mut out).await {
+                Some(rc) => rc,
+                None => {
+                    // Only the commands above are declared deferred
+                    let _ = write!(out, "Unknown Remote Command: '{}'", request.command.name);
+                    127
+                }
+            }
+        };
+        request.respond(rc, out.as_str());
+    }
+}
+
+fn claw_state_name(state: ClawState) -> &'static str {
+    match state {
+        ClawState::Error => "ERROR",
+        ClawState::Disarmed => "DISARMED",
+        ClawState::Unknown => "UNKNOWN_POSITION",
+        ClawState::Opened => "OPENED",
+        ClawState::Closed => "CLOSED",
+        ClawState::Opening => "OPENING",
+        ClawState::Closing => "CLOSING",
+    }
+}
+
+fn dropper_state_name(state: DropperState) -> &'static str {
+    match state {
+        DropperState::Error => "ERROR",
+        DropperState::Disarmed => "DISARMED",
+        DropperState::Ready => "READY",
+        DropperState::Dropping => "DROPPING",
+        DropperState::Dropped => "DROPPED",
+    }
+}
+
+fn torpedo_state_name(state: TorpedoState) -> &'static str {
+    match state {
+        TorpedoState::Error => "ERROR",
+        TorpedoState::Disarmed => "DISARMED",
+        TorpedoState::Charging => "CHARGING",
+        TorpedoState::Charged => "CHARGED",
+        TorpedoState::Firing => "FIRING",
+        TorpedoState::Fired => "FIRED",
+    }
+}
+
+/// `actuators_cmd_cb`. Every sub-command only updates the actuator state and queues servo writes, so it runs
+/// inside the request handler like in C.
+fn actuator_cmd(args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let Some(cmd) = args.get(1) else {
+        // C printed this and then went on with a null command
+        let _ = writeln!(out, "Usage: @actuator [cmd]");
+        return 2;
+    };
+
+    let result = match cmd {
+        "arm" => execute(Command::Arm),
+        "disarm" => execute(Command::Disarm),
+        "status" => {
+            let s = status();
+            let yes_no = if s.busy { "Yes" } else { "No" };
+            let _ = writeln!(out, "Actuators Busy:\t{yes_no}");
+            let _ = writeln!(out, "Claw State:\t{}", claw_state_name(s.claw));
+            let _ = writeln!(out, "Dropper State:\t\t{}", dropper_state_name(s.dropper));
+            let _ = writeln!(out, "# Droppers Left:\t{}", s.dropper_available);
+            let _ = writeln!(out, "Torpedo State:\t\t{}", torpedo_state_name(s.torpedo));
+            let _ = writeln!(out, "# Torpedoes Left:\t{}", s.torpedo_available);
+            return 0;
+        }
+        "drop" => execute(Command::DropMarker),
+        "fire" => execute(Command::FireTorpedo),
+        // Only the torpedoes, as in C (the ROS service reloads the droppers too)
+        "notifyreload" => with_actuators(|a, _| a.torpedo_notify_reload()),
+        "gohome" => execute(Command::TorpedoMarkerMoveHome),
+        "sethome" => execute(Command::TorpedoMarkerSetHome),
+        "clawopen" => execute(Command::Claw { open: true }),
+        "clawclose" => execute(Command::Claw { open: false }),
+        "setclosedpos" => execute(Command::ClawSetClosedPosition),
+        "clawmove" => {
+            let Some(delta) = args.get(2) else {
+                let _ = writeln!(out, "Usage: @actuator clawmove [delta]");
+                return 2;
+            };
+            let Some(delta) = parse_decimal(delta) else {
+                let _ = writeln!(out, "Invalid number provided for delta");
+                return 2;
+            };
+            let Ok(delta) = i32::try_from(delta) else {
+                let _ = writeln!(out, "Number provided for delta does not fit into int32");
+                return 2;
+            };
+            with_actuators(|a, bus| a.claw_creep(delta, bus))
+        }
+        other => {
+            let _ = writeln!(out, "Unknown Command: '{other}'");
+            return 2;
+        }
+    };
+
+    match result {
+        Ok(()) => 0,
+        Err(err) => {
+            let _ = writeln!(out, "Command '{cmd}' Failed with Error: {}", err.message());
+            1
+        }
+    }
+}

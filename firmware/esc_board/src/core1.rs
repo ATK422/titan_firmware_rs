@@ -10,8 +10,8 @@
 //! * kill: [`on_kill`] latches a flag the next tick sees even if the kill was brief; the loop also polls the kill
 //!   state every tick
 //!
-//! Like `safety_core1_checkin`, core 1 checks in every tick and [`core1_watchdog_task`] on core 0 panics (resetting
-//! the board) if it stops for 250 ms.
+//! Like `safety_core1_checkin`, core 1 checks in every tick and [`core1_watchdog_task`] on core 0 resets the board
+//! with a `CORE1_TIMEOUT` crash record if it stops for 250 ms.
 
 use core::cell::{Cell, RefCell};
 
@@ -104,8 +104,10 @@ pub async fn core1_watchdog_task() -> ! {
         ticker.next().await;
         if CORE1_RUNNING.load(Ordering::Relaxed) {
             let last = Instant::from_ticks(LAST_CHECKIN.load(Ordering::Relaxed));
-            if Instant::now().saturating_duration_since(last) > CHECKIN_INTERVAL {
-                panic!("Core 1 did not check in to safety within required interval");
+            let silent = Instant::now().saturating_duration_since(last);
+            if silent > CHECKIN_INTERVAL {
+                // Recorded as CORE1_TIMEOUT in the crash log, like `safety_internal_multicore_tick`
+                titan_rp2040::crash::core1_timeout(silent.as_millis() as u32);
             }
         }
     }

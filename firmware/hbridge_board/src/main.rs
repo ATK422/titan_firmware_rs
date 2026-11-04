@@ -23,6 +23,7 @@
 mod actuators;
 mod bridges;
 mod multidrop;
+mod remote_cmd;
 
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -90,6 +91,7 @@ async fn main(spawner: Spawner) {
             on_kill: bridges::on_kill,
             on_enable: bridges::on_enable,
             on_board_message: handle_board_message,
+            remote_commands: &remote_cmd::COMMANDS,
         },
     );
 

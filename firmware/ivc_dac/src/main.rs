@@ -15,6 +15,10 @@
 //!   `ivc/rx_sample_stream`, `ivc/rx_sample_snr_stream`
 //! * plus the standard `heartbeat`, `state/firmware` and `state/kill`
 //!
+//! CANmore remote commands, those of `canmore.c`: `write_lock`, `tx_queue_empty`, `receiving_packet`,
+//! `set_comms_mode` and `set_pinger_mode`; see [`COMMANDS`]. The C IVCDAC had the file but never registered them
+//! (`register_canmore_commands` is commented out in `ivc_init`, and it used the USB transport).
+//!
 //! Pins as on IVCBoard2: transducer drive on GPIO 7, filter output select on GPIO 3, board ID on GPIO 6, hydrophone
 //! on ADC 1 (GPIO 27). Like IVCBoard2 this talks to the bridge over the internal CAN bus instead of USB micro-ROS.
 
@@ -27,6 +31,8 @@
 mod hw;
 
 use core::cell::Cell;
+use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -44,6 +50,7 @@ use ivc2_core::pinger::PingerFreq;
 use ivc2_core::{DEBUG_TONE_MS, Symbol};
 use titan_link::{DeviceToHost, HostToDevice, ivc_dac};
 use titan_rp2040::board::{self, BoardConfig, Bus};
+use titan_rp2040::control::{Args, Command, Response};
 use titan_rp2040::link;
 
 #[cfg(not(feature = "rx-side"))]
@@ -64,6 +71,8 @@ bind_interrupts!(struct Irqs {
 static PINGER: Mutex<CriticalSectionRawMutex, Cell<(bool, PingerFreq)>> =
     Mutex::new(Cell::new((false, PingerFreq::DEFAULT)));
 static TONE: Signal<CriticalSectionRawMutex, Symbol> = Signal::new();
+/// Set while [`tone_task`] plays a tone, for `write_lock`.
+static PLAYING: AtomicBool = AtomicBool::new(false);
 
 fn handle_board_message(msg: HostToDevice) {
     match msg {
@@ -91,6 +100,7 @@ async fn main(spawner: Spawner) {
             bus: Bus::Internal,
             version: titan_rp2040::version!(),
             on_board_message: handle_board_message,
+            remote_commands: &COMMANDS,
             ..BoardConfig::DEFAULT
         },
     );
@@ -121,6 +131,7 @@ async fn main(spawner: Spawner) {
 async fn tone_task(mut tx: hw::Transmitter, _output_select: Output<'static>) -> ! {
     loop {
         let mut symbol = TONE.wait().await;
+        PLAYING.store(true, Ordering::Relaxed);
         loop {
             send(ivc_dac::DeviceToHost::TxStart);
             tx.play(symbol);
@@ -130,6 +141,7 @@ async fn tone_task(mut tx: hw::Transmitter, _output_select: Output<'static>) -> 
             }
         }
         tx.enable(false);
+        PLAYING.store(false, Ordering::Relaxed);
         send(ivc_dac::DeviceToHost::TxEnd);
     }
 }
@@ -138,6 +150,85 @@ fn send(msg: ivc_dac::DeviceToHost) {
     if link::is_connected() && !link::send(&DeviceToHost::IvcDac(msg)) {
         defmt::warn!("CAN queue full, dropped IVCDAC report");
     }
+}
+
+// ========================================
+// CANmore remote commands (`canmore.c`)
+// ========================================
+
+/// The remote commands of `canmore.c`, in `register_canmore_commands` order. This firmware has no packet modem, so
+/// the status queries report the closest state it has (see each handler). The mode commands change [`PINGER`], the
+/// same path as the bridge's `ivc/pinger/*` messages; like those, they only matter to `rx-side` builds.
+///
+/// The C callbacks were `void` functions cast to the `int` callback type, so their return code was whatever was left
+/// in r0; these return 0 on success and 1 on an error.
+static COMMANDS: [Command; 5] = [
+    Command::new("write_lock", "", "get the status of the write lock bool", write_lock),
+    Command::new("tx_queue_empty", "", "see if the tx queue is empty", tx_queue_empty),
+    Command::new("receiving_packet", "", "check if the receiving packet flag is set", receiving_packet),
+    Command::new("set_comms_mode", "", "set IVC to listen for comms signals", set_comms_mode),
+    Command::new(
+        "set_pinger_mode",
+        "[pinger freq in khz (20, 25, 30, 35, 40)]",
+        "will set ivc to listen for that frequency\n",
+        set_pinger_mode,
+    ),
+];
+
+fn bool_str(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+/// `tx.flags.is_writing`. Nothing set it in the C IVCDAC (only packet transmission did, which this firmware never
+/// runs), so it always read false; the closest state here is whether a `send_freq` tone is playing.
+fn write_lock(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "is_writing: [{}]", bool_str(PLAYING.load(Ordering::Relaxed)));
+    0
+}
+
+/// `tx_queue_empty()`. There is no transmit queue here: `ivc/enqueue_data` is not forwarded to this board (in C it
+/// filled a queue nothing ever drained), so it is always empty.
+fn tx_queue_empty(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "empty: [true]");
+    0
+}
+
+/// `rx.flags.receiving_packet`. There is no packet receiver here (the C IVCDAC never set the flag either), so it is
+/// always false.
+fn receiving_packet(_args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let _ = writeln!(out, "receiving_packet: [false]");
+    0
+}
+
+/// Clears `rx.flags.is_pinger_mode`, like `ivc/pinger/enable` false.
+fn set_comms_mode(_args: &Args<'_>, _out: &mut Response<'_>) -> i32 {
+    PINGER.lock(|p| p.set((false, p.get().1)));
+    0
+}
+
+/// Selects the pinger frequency (`rx.pinger_mode`) without turning the pinger mode on, like C.
+///
+/// C checked `argc != 1`, but its `argc` counts the command name, so the command always failed; this takes exactly
+/// one argument as the usage says. Only the five listed frequencies are accepted, by exact text like C's `strcmp`
+/// (37 kHz stays reachable through `ivc/pinger/set_freq_khz`).
+fn set_pinger_mode(args: &Args<'_>, out: &mut Response<'_>) -> i32 {
+    let (2, Some(arg)) = (args.len(), args.get(1)) else {
+        let _ = writeln!(out, "ERROR: arg must be exactly one of [ 20 | 25 | 30 | 35 | 40 ]");
+        return 1;
+    };
+    let freq = match arg {
+        "20" => PingerFreq::K20,
+        "25" => PingerFreq::K25,
+        "30" => PingerFreq::K30,
+        "35" => PingerFreq::K35,
+        "40" => PingerFreq::K40,
+        _ => {
+            let _ = writeln!(out, "ERROR: <{arg}> is unrecognized");
+            return 1;
+        }
+    };
+    PINGER.lock(|p| p.set((p.get().0, freq)));
+    0
 }
 
 #[cfg(feature = "rx-side")]

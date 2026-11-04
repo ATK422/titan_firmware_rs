@@ -4,16 +4,18 @@
 //! * sends the CANmore heartbeat every 500 ms
 //! * carries `titan_link` messages between [`crate::link`] and the bus as CANmore messages of subtype
 //!   [`canmore::MSG_SUBTYPE_TITAN_LINK`]
-//! * carries other CANmore messages through [`TX`]/[`RX`] and utility frames through [`UTIL_TX`]/[`UTIL_RX`]
+//! * carries other CANmore messages through [`TX`]/[`RX`] and utility frames through [`UTIL_TX`]/[`UTIL_RX`],
+//!   except control interface requests (channel 14), which go to [`CONTROL_RX`] for [`crate::control`]
 //!
 //! The bus counts as online while heartbeats keep making it onto the bus; if the controller stays offline for 10 s
 //! it is reset, which recovers the chip from the rare states where it silently stops transmitting.
 
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select3, select4};
 use embassy_rp::clocks::Gpout;
 use embassy_rp::peripherals::PIN_21;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use portable_atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -51,6 +53,22 @@ pub static RX: Channel<CriticalSectionRawMutex, CanMessage, QUEUE_DEPTH> = Chann
 pub static UTIL_TX: Channel<CriticalSectionRawMutex, UtilityFrame, UTIL_QUEUE_DEPTH> = Channel::new();
 /// Utility frames received from the agent (for example thruster commands on [`canmore::CHAN_THRUSTER_CMDS`]).
 pub static UTIL_RX: Channel<CriticalSectionRawMutex, UtilityFrame, UTIL_QUEUE_DEPTH> = Channel::new();
+
+/// Control interface requests (utility channel 14) for [`crate::control::can_control_task`].
+pub static CONTROL_RX: Channel<CriticalSectionRawMutex, heapless::Vec<u8, { canmore::MAX_FRAME_SIZE }>, 4> =
+    Channel::new();
+
+/// Recovery actions of the `candbg` remote command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
+pub enum DebugAction {
+    /// Service the controller's interrupts again (`canbus_reenable_intr`).
+    InterruptEnable,
+    /// Reinitialize the controller (`canbus_fifo_clear`, `canbus_reset`).
+    Reset,
+}
+
+/// Set by `candbg`, carried out by [`can_task`].
+pub static DEBUG_ACTION: Signal<CriticalSectionRawMutex, DebugAction> = Signal::new();
 
 static CONTROL_INTERFACE_MODE: AtomicU8 = AtomicU8::new(ControlInterfaceMode::None as u8);
 
@@ -165,6 +183,12 @@ async fn serve(
             let fields = id::Fields::decode(frame.id, frame.extended);
             if fields.frame_type == FrameType::Util {
                 let Ok(data) = heapless::Vec::from_slice(frame.data()) else { continue };
+                if fields.noc == canmore::CHAN_CONTROL_INTERFACE {
+                    if CONTROL_RX.try_send(data).is_err() {
+                        defmt::warn!("Control interface queue full, dropping request");
+                    }
+                    continue;
+                }
                 if UTIL_RX.try_send(UtilityFrame { channel: fields.noc, data }).is_err() {
                     defmt::warn!("CAN utility queue full, dropping frame on channel {}", fields.noc);
                 }
@@ -260,17 +284,28 @@ async fn serve(
             continue;
         }
         let backlog = outgoing.is_some() || utility_pending.is_some();
-        match select3(dev.wait_for_interrupt(), Timer::at(next_heartbeat), async {
-            if backlog {
-                // Transmit queue is full; check back shortly
-                Timer::after_millis(1).await
-            } else {
-                select3(link::OUTBOX.ready_to_receive(), TX.ready_to_receive(), UTIL_TX.ready_to_receive()).await;
+        let woken = select4(
+            dev.wait_for_interrupt(),
+            Timer::at(next_heartbeat),
+            async {
+                if backlog {
+                    // Transmit queue is full; check back shortly
+                    Timer::after_millis(1).await
+                } else {
+                    select3(link::OUTBOX.ready_to_receive(), TX.ready_to_receive(), UTIL_TX.ready_to_receive()).await;
+                }
+            },
+            DEBUG_ACTION.wait(),
+        )
+        .await;
+        match woken {
+            Either4::Fourth(DebugAction::Reset) => {
+                defmt::warn!("CAN controller reset requested");
+                dev.init(config.rates, &config.filters()).await?;
             }
-        })
-        .await
-        {
-            Either3::First(()) | Either3::Second(()) | Either3::Third(()) => {}
+            // The interrupt line is serviced at the top of the loop
+            Either4::Fourth(DebugAction::InterruptEnable) => {}
+            Either4::First(()) | Either4::Second(()) | Either4::Third(()) => {}
         }
     }
 }

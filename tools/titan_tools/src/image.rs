@@ -299,13 +299,14 @@ mod tests {
             return;
         };
         let image = FlashImage::from_elf(&data).unwrap();
-        // embassy-rp images start with boot2 at the start of flash, followed by the vector table
-        assert_eq!(image.base_address(), FLASH_BASE);
+        // Images are linked behind the bootloader: their boot2 at +16 KiB, followed by the vector table
+        assert_eq!(image.base_address(), FLASH_BASE + 0x4000);
         let vectors = image.page(1);
         let initial_sp = u32::from_le_bytes(vectors[0..4].try_into().unwrap());
         let reset = u32::from_le_bytes(vectors[4..8].try_into().unwrap());
         assert!((0x2000_0000..=0x2004_2000).contains(&initial_sp), "initial SP {initial_sp:#x}");
-        assert!((FLASH_BASE..FLASH_BASE + image.size()).contains(&reset), "reset vector {reset:#x}");
+        let base = image.base_address();
+        assert!((base..base + image.size()).contains(&reset), "reset vector {reset:#x}");
         assert_eq!(reset & 1, 1, "reset vector must be a thumb address");
         // No pico-sdk binary info in Rust firmware
         assert_eq!(image.apps.len(), 1);

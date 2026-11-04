@@ -31,15 +31,15 @@
 //! * The event and error callbacks run in the driver's task instead of in interrupt context.
 //! * A full command queue is reported through the error callback from the driver task, and the command methods
 //!   return `false`, rather than calling the error callback from the caller's context.
-//! * The CANmore debug commands (`@dynping`, `@dynread`, `@dynwrite`, ...) are not ported: the CANmore remote
-//!   command interface doesn't exist in the Rust firmware yet.
+//! * The CANmore debug commands (`@dynping`, `@dynwrite`, `@dynram`, ...) live in the board firmware, which owns the
+//!   remote command table; [`Servos::raw_request`] and [`Servos::link_states`] give them what they need.
 
 #![no_std]
 
 mod driver;
 pub mod uart;
 
-pub use driver::{Driver, Servos};
+pub use driver::{Driver, LinkState, RAW_REPLY_PARAMS, RawError, RawReply, RawRequest, Servos};
 pub use dynamixel_protocol as protocol;
 pub use dynamixel_protocol::{Eeprom, Ram};
 

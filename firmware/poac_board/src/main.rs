@@ -22,6 +22,7 @@
 #![no_main]
 
 mod actuators;
+mod remote_cmd;
 mod uart;
 
 use defmt_rtt as _;
@@ -117,6 +118,7 @@ async fn main(spawner: Spawner) {
             on_kill: kill::on_kill,
             on_enable: kill::on_enable,
             on_board_message: handle_board_message,
+            remote_commands: &remote_cmd::COMMANDS,
         },
     );
 

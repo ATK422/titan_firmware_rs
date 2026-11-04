@@ -21,16 +21,19 @@
 //! ```
 //!
 //! [`start`] sets up safety first (so the watchdog covers everything after it), then spawns the status LED, the CAN
-//! bus and the link. The `can_block!` macro moves the block's peripherals out of `p`: WATCHDOG, PWM slices 6 and 7,
-//! GPIO 13-15 and 17-22, SPI0 and DMA channels 1 and 2. Everything else stays available to the board.
+//! bus, the control interface and the link. The `can_block!` macro moves the block's peripherals out of `p`:
+//! WATCHDOG, PWM slices 6 and 7, GPIO 13-15 and 17-22, SPI0 and DMA channels 1 and 2. Everything else stays
+//! available to the board.
 
 use embassy_executor::Spawner;
 use embassy_rp::Peri;
 use embassy_rp::clocks::Gpout;
-use embassy_rp::peripherals::{PIN_21, WATCHDOG};
+use embassy_rp::flash::{Blocking, Flash};
+use embassy_rp::peripherals::{FLASH, PIN_21, WATCHDOG};
 use titan_link::{HostToDevice, ReleaseType};
 
 use crate::canbus::{self, CanConfig};
+use crate::control::{self, Command};
 use crate::led::{self, StatusLed};
 use crate::link::{self, LinkConfig};
 use crate::mcp251xfd::{BitRates, Mcp251xfd};
@@ -44,6 +47,8 @@ pub struct Version {
     pub release_type: ReleaseType,
     /// `git describe` of the build.
     pub git: &'static str,
+    /// The firmware crate's name, which starts the version string like the C project name.
+    pub package: &'static str,
 }
 
 /// Which CAN bus of the robot the board sits on (`CAN_BUS_NAME` in the C board headers).
@@ -89,6 +94,8 @@ pub struct BoardConfig {
     pub on_enable: fn(),
     /// See [`LinkConfig::on_board_message`].
     pub on_board_message: fn(HostToDevice),
+    /// The board's remote commands for `canmore_cli` (`debug_remote_cmd_register`), see [`crate::control`].
+    pub remote_commands: &'static [Command],
 }
 
 fn noop() {}
@@ -103,11 +110,12 @@ impl BoardConfig {
         name: "unknown",
         client_id: 0,
         bus: Bus::Internal,
-        version: Version { major: 0, minor: 0, release_type: ReleaseType::Debug, git: "unknown" },
+        version: Version { major: 0, minor: 0, release_type: ReleaseType::Debug, git: "unknown", package: "unknown" },
         fault_names: &STANDARD_FAULT_NAMES,
         on_kill: noop,
         on_enable: noop,
         on_board_message: ignore_message,
+        remote_commands: &[],
     };
 }
 
@@ -141,6 +149,9 @@ pub fn start(spawner: Spawner, block: CanBlock, config: BoardConfig) {
     let can_config = CanConfig { client_id: config.client_id, rates: config.bus.rates() };
     spawner.spawn(canbus::can_task(block.can, block.can_clock, can_config).unwrap());
 
+    control::init(config.name, config.version, flash_unique_id(), &control::CAN_COMMANDS, config.remote_commands);
+    spawner.spawn(control::can_control_task().unwrap());
+
     spawner.spawn(
         link::link_task(LinkConfig {
             board_name: config.name,
@@ -153,6 +164,22 @@ pub fn start(spawner: Spawner, block: CanBlock, config: BoardConfig) {
         })
         .unwrap(),
     );
+}
+
+/// Reads the flash unique ID (lower word in the lower 32 bits, as the debug interface reports it), or 0.
+///
+/// Called before the board's own tasks run, so nothing else is using the flash yet; a board that owns `FLASH`
+/// keeps it, as the driver created here is dropped again.
+pub fn flash_unique_id() -> u64 {
+    // SAFETY: see above; the blocking driver only lives for this call
+    let mut flash = Flash::<_, Blocking, { control::FLASH_SIZE as usize }>::new_blocking(unsafe { FLASH::steal() });
+    let mut id = [0u8; 8];
+    if flash.blocking_unique_id(&mut id).is_err() {
+        defmt::warn!("Couldn't read the flash unique ID");
+        return 0;
+    }
+    // C reads the ID bytes as two little-endian words (`mcu_control_flash_id`)
+    u64::from_le_bytes(id)
 }
 
 #[doc(hidden)]
@@ -187,6 +214,7 @@ macro_rules! version {
             minor: $crate::board::parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
             release_type: $crate::board::release_type(env!("TITAN_RELEASE_TYPE")),
             git: env!("TITAN_GIT_DESCRIBE"),
+            package: env!("CARGO_PKG_NAME"),
         }
     };
 }
