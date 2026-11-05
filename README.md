@@ -76,7 +76,7 @@ unless a board's `main.rs` says otherwise (IDs 0-4 are fixed by the Rust safety 
 | `crates/titan_build` | Build script helper: memory map, linker scripts, version info | `titan_version`, `global_defs.cmake` |
 | `crates/*_core` | Hardware independent logic of each board, host-tested (`ivc_core`, `ivc2_core`, `esc_core`, `ledc_core`, `power_core`, `hbridge_core`, `puddles_core`, `smart_battery_core`, `actuator_core`) | the board sources |
 | `crates/dynamixel_protocol` | Dynamixel 2.0 packets, CRC-16, byte stuffing, XL430 control table | `driver_dynamixel` |
-| `host/titan_bridge` | rclrs ROS 2 node serving one Rust board over SocketCAN or UDP | micro-ROS agent + board `ros.c` |
+| `host/titan_bridge` | rclrs ROS 2 node serving one Rust board over SocketCAN, CAN over UDP (cannelloni) or UDP | micro-ROS agent + board `ros.c` |
 | `tools/upload_tool`, `tools/canmore_cli`, `tools/titan_tools` | Flashing and debug tools, shared host library | `tools/upload_tool`, `tools/canmore_cli`, `tools/lib` |
 | `tools/smart_battery_id` | Builds the UF2 that programs a smart battery's serial | `talos/SmartBattery/id_gen` |
 
@@ -177,7 +177,16 @@ titan_bridge --board ivc                                  # talos, can0, client 
 titan_bridge --board esc1                                 # second ESC board
 titan_bridge --board smart_battery --interface can1 --client-id 5
 titan_bridge --board puddles_backplane --interface 0.0.0.0:2203,192.168.1.42:2203
+titan_bridge --board esc0 --interface cannelloni:127.0.0.1:20000   # CAN over UDP, no SocketCAN
 ```
+
+`--interface cannelloni:HOST:PORT` reaches the CAN bus over UDP instead of SocketCAN, in
+[cannelloni](https://github.com/mguentner/cannelloni)'s framing (protocol version 2), through a hub that forwards
+the bus's frames to every peer that sends to it: the firmware simulator's `--cannelloni BUS=HOST:PORT`. That needs
+no `vcan` and no root, so the bridge runs on WSL2 (whose kernel has no CAN drivers), on macOS and on any Linux. The
+bridge filters the hub's frames for its client as the SocketCAN filters do, and sends an empty datagram every second
+while quiet so the hub keeps it. SocketCAN is Linux only; on other systems the bridge builds without it and only
+takes `cannelloni:` and UDP interfaces.
 
 `--namespace` and `--client-id` override the board defaults; anything after `--ros-args` goes to rcl. Puddles uses
 UDP port 2203 at both ends: one datagram is the bytes `TL` followed by one postcard-encoded `titan_link` message.
