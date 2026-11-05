@@ -6,10 +6,12 @@
 //!
 //! ```text
 //! titan_bridge --board ivc [--interface can0] [--namespace talos] [--client-id 8] [--ros-args ...]
+//! titan_bridge --board esc0 --interface cannelloni:127.0.0.1:20000    # CAN over UDP, no SocketCAN
 //! ```
 
 mod boards;
 mod can;
+mod cannelloni;
 mod common;
 mod link;
 mod ros;
@@ -24,7 +26,6 @@ use rclrs::{Context, CreateBasicExecutor, IntoNodeOptions, SpinOptions};
 use titan_link::{DeviceToHost, HostToDevice};
 
 use crate::boards::{BOARDS, BoardProfile, Transport};
-use crate::can::CanLink;
 use crate::common::CommonTopics;
 use crate::link::{Event, Link};
 
@@ -41,7 +42,7 @@ struct Args {
 fn usage() -> String {
     let boards: Vec<_> = BOARDS.iter().map(|b| b.name).collect();
     format!(
-        "usage: titan_bridge --board <{}> [--interface can0 | <bind ip[:port]>[,<board ip[:port]>]] \
+        "usage: titan_bridge --board <{}> [--interface can0 | cannelloni:<host>:<port> | <bind ip[:port]>[,<board ip[:port]>]] \
          [--namespace <robot>] [--client-id <id>] [--ros-args ...]",
         boards.join("|")
     )
@@ -91,7 +92,8 @@ fn main() -> Result<()> {
     let logger = format!("{}.{}", args.namespace, node_name);
 
     let link: Arc<dyn Link> = match board.transport {
-        Transport::Can { fd } => Arc::new(CanLink::open(&args.interface, args.client_id, fd)?),
+        // A SocketCAN interface, or `cannelloni:HOST:PORT` for CAN over UDP to a cannelloni hub
+        Transport::Can { fd } => can::open(&args.interface, args.client_id, fd)?,
         // `--interface` is `[BIND][,BOARD]` here (see `puddles_core::wire::LinkSpec`); the CAN default means the
         // default addresses
         Transport::Udp => {

@@ -10,5 +10,8 @@ anyhow = "1.0.104"
 canmore = { path = "../../crates/canmore" }
 puddles_core = { path = "../../crates/puddles_core" }
 rclrs = "0.8"
-socketcan = "4.0.0"
 titan_link = { path = "../../crates/titan_link" }
+
+# SocketCAN is Linux only; elsewhere the bridge uses CAN over UDP (`--interface cannelloni:HOST:PORT`)
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = "4.0.0"
