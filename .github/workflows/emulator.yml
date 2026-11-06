@@ -17,11 +17,9 @@
 # Layout: the emulator is checked out at master (or `emulator_ref`), and this checkout of titan_firmware_rs takes
 # the place of its `external/titan_firmware_rs` submodule. The emulator's workspace builds against this commit's
 # host crates (`crates/canmore`, `crates/titan_link`) and its tests boot this commit's images
-# (TITAN_RS_RELEASE_DIR); no second token or submodule fetch is needed.
+# (TITAN_RS_RELEASE_DIR); no submodule fetch is needed.
 #
-# Secret: FIRMWARE_SIMULATOR_TOKEN, a token that can read ATK422/firmware_simulator (a fine-grained personal access
-# token with "Contents: read" on that repository; Settings > Secrets and variables > Actions). Without it the job
-# fails at its first step. Pull requests from forks get no secrets, so they fail there too.
+# No secrets are needed: ATK422/firmware_simulator is public, so pull requests from forks run this too.
 name: Emulator
 
 on:
@@ -51,21 +49,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check for the emulator token
-        env:
-          TOKEN: ${{ secrets.FIRMWARE_SIMULATOR_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error title=FIRMWARE_SIMULATOR_TOKEN is not set::The emulator (ATK422/firmware_simulator) may be private: add a repository secret FIRMWARE_SIMULATOR_TOKEN holding a token that can read it (a fine-grained personal access token with Contents: read). Pull requests from forks get no secrets."
-            exit 1
-          fi
-
       - name: Check out the emulator
         uses: actions/checkout@v4
         with:
           repository: ATK422/firmware_simulator
           ref: ${{ env.EMULATOR_REF }}
-          token: ${{ secrets.FIRMWARE_SIMULATOR_TOKEN }}
           path: firmware_simulator
           submodules: false
           persist-credentials: false
